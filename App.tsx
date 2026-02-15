@@ -1,11 +1,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, LayoutGrid, LogOut, CheckCircle2, ArrowDownLeft, ArrowUpRight, Clock, AlertTriangle, Truck, Phone, RotateCcw, Settings2, BarChart3, Package, Archive, Mic, MapPin, Power, RefreshCcw, User, Tag } from 'lucide-react';
-import MapView from './components/MapView';
-import DeliveryCard from './components/DeliveryCard';
-import { Delivery, DeliveryStatus, DeliveryType } from './types';
-import { parseAddress, optimizeRoute, buildSearchQuery } from './services/geminiService';
-
+import DeliveryCard from './DeliveryCard';import { Delivery, DeliveryStatus, DeliveryType } from './types';
+import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
 const SEQUENCE_KEY = 'logiroute_sequence_v1';
