@@ -1,0 +1,8 @@
+{
+  "name": "LogiRoute AI",
+  "description": "A professional delivery route management system with real-time mapping, smart address parsing, and AI-powered route optimization.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ]
+}
