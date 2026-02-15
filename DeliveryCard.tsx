@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Delivery, DeliveryStatus, DeliveryType } from '../types';
+import { Delivery, DeliveryStatus, DeliveryType } from '../ypes';
 import { CheckCircle, Clock, MapPin, Navigation, ExternalLink, Trash2, GripVertical, ChevronDown, ChevronUp, ArrowDownLeft, ArrowUpRight, AlertTriangle, Phone, X, Tag } from 'lucide-react';
 
 interface DeliveryCardProps {
