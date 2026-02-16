@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import { Delivery, DeliveryStatus, DeliveryType } from '../ypes';
+import { Delivery, DeliveryStatus, DeliveryType } from '../types';
 
 interface MapViewProps {
   deliveries: Delivery[];
