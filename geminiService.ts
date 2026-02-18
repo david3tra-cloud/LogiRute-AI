@@ -191,8 +191,8 @@ export const parseAddress = async (
   // 3. Plus Code Check (If it's a raw plus code, we might still need grounding to get the full address/name)
   // However, if we reach here, we likely need the API to resolve the business name/address.
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
+  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
+const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
 
   const result = await withRetry(async () => {
     const prompt = `
@@ -286,8 +286,8 @@ export const optimizeRoute = async (deliveries: Delivery[], start: string, onRet
     return addressCache['last_route_order'];
   }
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const result = await withRetry(async () => {
+  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
+const result = await withRetry(async () => {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: `Ordena estos IDs para la ruta más corta empezando en ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde solo JSON: {"order": ["id1", "id2", ...]}`,
