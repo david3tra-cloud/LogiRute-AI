@@ -251,14 +251,22 @@ const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
       }
     }
 
-    if (!lat || !lng) {
-      const fallback = extractCoords(text);
-      if (fallback) { lat = fallback.lat; lng = fallback.lng; }
-    }
+  if (!lat || !lng) {
+  const fallback = extractCoords(text);
+  if (fallback) { lat = fallback.lat; lng = fallback.lng; }
+}
 
-    if (!lat || !lng) {
-      throw new Error(`No se encontró "${rawInput}". Intenta ser más específico.`);
-    }
+if (!lat || !lng) {
+  // Si no hay coordenadas claras, devolvemos un punto aproximado sin romper el flujo.
+  return {
+    recipient: rawInput || "Destino sin coordenadas claras",
+    address: rawInput || "Sin dirección precisa",
+    lat: anchor.latitude,
+    lng: anchor.longitude,
+    sourceUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rawInput || "destino")}`,
+    phone: undefined
+  };
+}
 
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
