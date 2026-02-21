@@ -9,17 +9,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react-dom": "^19.2.3",
-    "lucide-react": "^0.562.0",
     "@google/genai": "^1.37.0",
+    "@google/generative-ai": "^0.24.1",
     "leaflet": "^1.9.4",
+    "lucide-react": "^0.562.0",
     "react": "^19.2.3",
-    "@google/generative-ai": "^0.24.1"
+    "react-dom": "^19.2.3",
+    "react-leaflet": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "terser": "^5.27.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
