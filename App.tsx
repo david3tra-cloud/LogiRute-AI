@@ -1,22 +1,341 @@
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, LayoutGrid, LogOut, CheckCircle2, ArrowDownLeft, ArrowUpRight, Clock, AlertTriangle, Truck, Phone, RotateCcw, Settings2, BarChart3, Package, Archive, Mic, MapPin, Power, RefreshCcw, User, Tag } from 'lucide-react';
-import DeliveryCard from './DeliveryCard';import { Delivery, DeliveryStatus, DeliveryType } from './types';
-import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
-import MapView from './MapView';
-const STORAGE_KEY = 'logiroute_deliveries_v3';
-const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
-const SEQUENCE_KEY = 'logiroute_sequence_v1';
+const handleAddDelivery = async (e: React.FormEvent) => {
+  e.preventDefault();
+  if (isParsing) return;
+
+  const name = newNameInput.trim();
+  let address = newAddressInput.trim();
+  const coords = newCoordsInput.trim();
+
+  if (!name && !address && !coords) {
+    alert("Introduce algún dato de búsqueda.");
+    return;
+  }
+
+  // Si no hay dirección pero sí nombre, usamos el nombre como base
+  if (!address && name) {
+    address = name;
+  }
+
+  // Añadimos contexto geográfico por defecto (ajusta a tu zona habitual)
+  const baseContext = "Elche, Alicante, España";
+  const fullAddress = address
+    ? `${address}, ${baseContext}`
+    : baseContext;
+
+  const exists = deliveries.find(d => 
+    (name && d.recipient.toLowerCase() === name.toLowerCase()) || 
+    (coords && d.sourceUrl?.includes(coords))
+  );
+  
+  if (exists && !window.confirm(`Ya tienes una parada para "${exists.recipient}". ¿Añadir duplicado?`)) {
+    setIsAdding(false);
+    return;
+  }
+
+  setIsParsing(true);
+  setParsingMessage("Búsqueda inteligente...");
+
+  try {
+    const queries = buildSearchQuery(name, fullAddress);
+    const searchQuery = queries[0];
+    const parsed = await parseAddress(searchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
+
+    const newDelivery: Delivery = {
+      id: Math.random().toString(36).substring(2, 9),
+      concept: conceptInput.trim() || undefined,
+      recipient: name || parsed.recipient,
+      address: parsed.address,
+      phone: newPhoneInput.trim() || parsed.phone || '',
+      coordinates: [parsed.lat, parsed.lng],
+      status: DeliveryStatus.PENDING,
+      type: newType,
+      sourceUrl: parsed.sourceUrl,
+      estimatedTime: `~${Math.floor(Math.random() * 3) + 1} h`,
+    };
+
+    setDeliveries(prev => [...prev, newDelivery]);
+
+    setConceptInput('');
+    setNewNameInput('');
+    setNewAddressInput('');
+    setNewPhoneInput('');
+    setNewCoordsInput('');
+    setIsAdding(false);
+    setSelectedId(newDelivery.id);
+  } catch (error: any) {
+    alert(error.message);
+  } finally {
+    setIsParsing(false);
+    setParsingMessage(null);
+  }
+};
+Con esto obligamos a que cada búsqueda lleve nombre/dirección + ciudad, lo que hace que cada parada tenga coordenadas más finas y no te las ponga todas en un centro genérico.
+​
+
+Si tú repartes en otra zona, cambia baseContext por tu zona habitual (por ejemplo, "Elx, Comunitat Valenciana, España").
+
+2. Pantalla en blanco en móvil al guardar la parada
+En tu flujo, al guardar la parada:
+
+Se actualiza deliveries.
+
+Se cierra el modal con setIsAdding(false).
+
+Se guarda todo en localStorage en el useEffect.
+
+Dos cosas que pueden romper en móvil y dejar pantalla en blanco:
+
+Error al leer de localStorage al iniciar (por datos corruptos).
+
+Error en parseAddress o en el acceso a window/navigator en móviles.
+
+Lo primero lo solucionamos endureciendo la lectura inicial de localStorage para que, si hay algo corrupto, no pete la app:
+
+ts
+const safeParse = <T,>(value: string | null, fallback: T): T => {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
 
 const App: React.FC = () => {
   const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : [];
+    return safeParse<Delivery[]>(saved, []);
   });
 
   const [manualSequence, setManualSequence] = useState<string[]>(() => {
     const saved = localStorage.getItem(SEQUENCE_KEY);
-    return saved ? JSON.parse(saved) : [];
+    return safeParse<string[]>(saved, []);
+  });
+
+  const [viewMode, setViewMode] = useState<'split' | 'map' | 'list' | 'control'>(() => {
+    const saved = localStorage.getItem(VIEW_MODE_KEY);
+    return (saved as any) || 'split';
+  });
+  // ... resto igual
+Y por seguridad extra evita que el efecto de guardado dispare cosas raras cuando la app se está cerrando:
+
+ts
+useEffect(() => {
+  if (isAppClosed) return;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
+    localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
+    localStorage.setItem(VIEW_MODE_KEY, viewMode);
+  } catch (e) {
+    console.warn("No se pudo guardar en localStorage", e);
+  }
+}, [deliveries, manualSequence, viewMode, isAppClosed]);
+Con estos cambios:
+
+Si el localStorage se corrompe en móvil, la app no se queda en blanco; se inicia limpia.
+​
+
+La creación de una parada usa una búsqueda más precisa, lo que hace que cada coordinates sea distinta y el mapa las pinte correctamente.
+​
+
+Qué tienes que hacer tú ahora
+En App.tsx, sustituye solo la función handleAddDelivery por la versión que te he puesto arriba (con el baseContext que tú quieras).
+
+Añade la función safeParse y usa esas inicializaciones de estado para deliveries y manualSequence.
+
+Actualiza el useEffect de localStorage por la versión con try/catch.
+
+Pruébalo:
+
+En PC: crea varias paradas con nombres/direcciones distintas y mira si en el mapa ya se separan bien.
+
+En móvil: abre la app, crea una parada desde el modal y confirma si deja de salir pantalla en blanco tras guardar.
+
+Dime qué tal y, si aún ves algún fallo (por ejemplo, la pantalla se queda en blanco justo al abrir el modal o al pulsar el botón), te pido el error exacto de la consola de móvil y lo rematamos.
+
+todo lo que me has dado de código para el código app.tsx?
+No, no hay que reemplazar todo el archivo, solo tres partes concretas dentro de tu App.tsx.
+​
+
+1) Añadir safeParse arriba del todo
+Encima de const App: React.FC = () => { pon esto:
+
+ts
+const safeParse = <T,>(value: string | null, fallback: T): T => {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+2) Cambiar solo las inicializaciones de estado
+Sustituye estas tres:
+
+ts
+const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  return saved ? JSON.parse(saved) : [];
+});
+
+const [manualSequence, setManualSequence] = useState<string[]>(() => {
+  const saved = localStorage.getItem(SEQUENCE_KEY);
+  return saved ? JSON.parse(saved) : [];
+});
+por estas:
+
+ts
+const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  return safeParse<Delivery[]>(saved, []);
+});
+
+const [manualSequence, setManualSequence] = useState<string[]>(() => {
+  const saved = localStorage.getItem(SEQUENCE_KEY);
+  return safeParse<string[]>(saved, []);
+});
+La parte de viewMode la puedes dejar como está.
+
+3) Cambiar solo handleAddDelivery
+Sustituye toda tu función handleAddDelivery por esta:
+
+ts
+const handleAddDelivery = async (e: React.FormEvent) => {
+  e.preventDefault();
+  if (isParsing) return;
+
+  const name = newNameInput.trim();
+  let address = newAddressInput.trim();
+  const coords = newCoordsInput.trim();
+
+  if (!name && !address && !coords) {
+    alert("Introduce algún dato de búsqueda.");
+    return;
+  }
+
+  if (!address && name) {
+    address = name;
+  }
+
+  const baseContext = "Elx, Comunitat Valenciana, España";
+  const fullAddress = address
+    ? `${address}, ${baseContext}`
+    : baseContext;
+
+  const exists = deliveries.find(d => 
+    (name && d.recipient.toLowerCase() === name.toLowerCase()) || 
+    (coords && d.sourceUrl?.includes(coords))
+  );
+  
+  if (exists && !window.confirm(`Ya tienes una parada para "${exists.recipient}". ¿Añadir duplicado?`)) {
+    setIsAdding(false);
+    return;
+  }
+
+  setIsParsing(true);
+  setParsingMessage("Búsqueda inteligente...");
+
+  try {
+    const queries = buildSearchQuery(name, fullAddress);
+    const searchQuery = queries[0];
+    const parsed = await parseAddress(searchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
+
+    const newDelivery: Delivery = {
+      id: Math.random().toString(36).substring(2, 9),
+      concept: conceptInput.trim() || undefined,
+      recipient: name || parsed.recipient,
+      address: parsed.address,
+      phone: newPhoneInput.trim() || parsed.phone || '',
+      coordinates: [parsed.lat, parsed.lng],
+      status: DeliveryStatus.PENDING,
+      type: newType,
+      sourceUrl: parsed.sourceUrl,
+      estimatedTime: `~${Math.floor(Math.random() * 3) + 1} h`,
+    };
+
+    setDeliveries(prev => [...prev, newDelivery]);
+
+    setConceptInput('');
+    setNewNameInput('');
+    setNewAddressInput('');
+    setNewPhoneInput('');
+    setNewCoordsInput('');
+    setIsAdding(false);
+    setSelectedId(newDelivery.id);
+  } catch (error: any) {
+    alert(error.message);
+  } finally {
+    setIsParsing(false);
+    setParsingMessage(null);
+  }
+};
+4) Cambiar el useEffect que guarda en localStorage
+Reemplaza este bloque:
+
+ts
+useEffect(() => {
+  if (isAppClosed) return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
+  localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
+  localStorage.setItem(VIEW_MODE_KEY, viewMode);
+}, [deliveries, manualSequence, viewMode, isAppClosed]);
+por este:
+
+ts
+useEffect(() => {
+  if (isAppClosed) return;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
+    localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
+    localStorage.setItem(VIEW_MODE_KEY, viewMode);
+  } catch (e) {
+    console.warn("No se pudo guardar en localStorage", e);
+  }
+}, [deliveries, manualSequence, viewMode, isAppClosed]);
+Con eso ya tienes todo lo necesario cambiado en App.tsx.
+​
+
+Cuando lo tengas guardado y desplegado, prueba:
+
+En PC: varias paradas distintas y mira si el mapa las separa.
+
+En móvil: añadir una parada y dime si sigue saliendo pantalla en blanco o no.
+
+dame mejor todo el código y así es mas sencillo, copio y pego
+Te paso App.tsx completo ya con todos los cambios integrados para que solo tengas que copiar y pegar.
+​
+
+tsx
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, LayoutGrid, LogOut, CheckCircle2, ArrowDownLeft, ArrowUpRight, Clock, AlertTriangle, Truck, Phone, RotateCcw, Settings2, BarChart3, Package, Archive, Mic, MapPin, Power, RefreshCcw, User, Tag } from 'lucide-react';
+import DeliveryCard from './DeliveryCard';
+import { Delivery, DeliveryStatus, DeliveryType } from './types';
+import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
+import MapView from './MapView';
+
+const STORAGE_KEY = 'logiroute_deliveries_v3';
+const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
+const SEQUENCE_KEY = 'logiroute_sequence_v1';
+
+const safeParse = <T,>(value: string | null, fallback: T): T => {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const App: React.FC = () => {
+  const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return safeParse<Delivery[]>(saved, []);
+  });
+
+  const [manualSequence, setManualSequence] = useState<string[]>(() => {
+    const saved = localStorage.getItem(SEQUENCE_KEY);
+    return safeParse<string[]>(saved, []);
   });
 
   const [viewMode, setViewMode] = useState<'split' | 'map' | 'list' | 'control'>(() => {
@@ -46,9 +365,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (isAppClosed) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
-    localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
-    localStorage.setItem(VIEW_MODE_KEY, viewMode);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
+      localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
+      localStorage.setItem(VIEW_MODE_KEY, viewMode);
+    } catch (e) {
+      console.warn("No se pudo guardar en localStorage", e);
+    }
   }, [deliveries, manualSequence, viewMode, isAppClosed]);
 
   useEffect(() => {
@@ -103,7 +426,7 @@ const App: React.FC = () => {
     if (isParsing) return;
 
     const name = newNameInput.trim();
-    const address = newAddressInput.trim();
+    let address = newAddressInput.trim();
     const coords = newCoordsInput.trim();
 
     if (!name && !address && !coords) {
@@ -111,7 +434,15 @@ const App: React.FC = () => {
       return;
     }
 
-    // Check for potential duplicate in existing list before calling API
+    if (!address && name) {
+      address = name;
+    }
+
+    const baseContext = "Elx, Comunitat Valenciana, España";
+    const fullAddress = address
+      ? `${address}, ${baseContext}`
+      : baseContext;
+
     const exists = deliveries.find(d => 
       (name && d.recipient.toLowerCase() === name.toLowerCase()) || 
       (coords && d.sourceUrl?.includes(coords))
@@ -126,8 +457,8 @@ const App: React.FC = () => {
     setParsingMessage("Búsqueda inteligente...");
 
     try {
-const queries = buildSearchQuery(name, address);
-    const searchQuery = queries[0];
+      const queries = buildSearchQuery(name, fullAddress);
+      const searchQuery = queries[0];
       const parsed = await parseAddress(searchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
       
       const newDelivery: Delivery = {
@@ -145,7 +476,6 @@ const queries = buildSearchQuery(name, address);
       
       setDeliveries(prev => [...prev, newDelivery]);
       
-      // Cleanup
       setConceptInput('');
       setNewNameInput('');
       setNewAddressInput('');
