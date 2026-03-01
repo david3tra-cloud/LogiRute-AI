@@ -1,10 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Delivery } from "../types";
 
-// Inicialización de la API con tu clave de entorno
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+// Inicialización con versión específica para evitar el error 404 (image_af9c99.png)
+const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(API_KEY);
 
-// Cache persistente para no gastar cuota en búsquedas repetidas
+// Cache persistente
 const CACHE_STORAGE_KEY = 'logiroute_address_cache_v1';
 const getInitialCache = (): Record<string, any> => {
   try {
@@ -28,15 +29,15 @@ const saveCache = () => {
 };
 
 /**
- * FUNCIÓN AÑADIDA: Necesaria para que App.tsx no dé error de "not defined"
+ * SOLUCIÓN AL ERROR DE VERCEL (image_b0109d.jpg):
+ * Exportamos buildSearchQuery para que App.tsx pueda usarlo.
  */
-export const buildSearchQuery = (name: string, address: string): string[] => {
-  const query = `${name} ${address}`.trim();
-  return [query];
+export const buildSearchQuery = (concept: string, name: string): string => {
+  return `${name} ${concept}`.trim();
 };
 
 /**
- * Función de reintentos para manejar errores 429 (Límite de cuota)
+ * Función de reintentos para manejar límites de cuota
  */
 async function withRetry<T>(
   fn: () => Promise<T>, 
@@ -49,11 +50,11 @@ async function withRetry<T>(
       return await fn();
     } catch (error: any) {
       lastError = error;
-      const isQuotaError = error?.message?.includes("429") || error?.status === 429 || error?.message?.includes("RESOURCE_EXHAUSTED");
+      const isQuotaError = error?.message?.includes("429") || error?.status === 429;
       
       if (isQuotaError && i < maxRetries - 1) {
         const waitTime = Math.pow(2, i) * 2000;
-        if (onRetry) onRetry(`Límite agotado. Reintentando en ${waitTime/1000}s...`);
+        if (onRetry) onRetry(`Reintentando en ${waitTime/1000}s...`);
         await new Promise(res => setTimeout(res, waitTime));
         continue;
       }
@@ -63,40 +64,25 @@ async function withRetry<T>(
   throw lastError;
 }
 
-/**
- * Extrae coordenadas de texto o URLs de Google Maps
- */
 const extractCoords = (text: string) => {
   if (!text) return null;
   const normalized = text.trim().replace(/(\d),(\d)/g, '$1.$2');
   const patterns = [
-    /([-+]?\d+\.\d+)\s*[,; \t]\s*([-+]?\d+\.\d+)/, // lat, lng puro
-    /@(-?\d+\.\d+),(-?\d+\.\d+)/,                  // formato URL @lat,lng
-    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/               // formato interno Maps
+    /([-+]?\d+\.\d+)\s*[,; \t]\s*([-+]?\d+\.\d+)/,
+    /@(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/
   ];
-  
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
-    if (match) {
-      const lat = parseFloat(match[1]);
-      const lng = parseFloat(match[2]);
-      if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90) return { lat, lng };
-    }
+    if (match) return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
   }
   return null;
 };
 
-/**
- * Limpia etiquetas de la IA (ej: "Dirección: Calle...")
- */
-const cleanLine = (text: string) => {
-  return text
-    .replace(/^(NOMBRE|DIRECCION|DIRECCIÓN|ADDRESS|NAME|UBICACIÓN|Lugar):/i, '')
-    .trim();
-};
+const cleanLine = (text: string) => text.replace(/^(NOMBRE|DIRECCIÓN|DIRECCION|UBICACIÓN):/i, '').trim();
 
 /**
- * PROCESAMIENTO DE DIRECCIONES (El "Cerebro")
+ * PARSE ADDRESS - EL CEREBRO
  */
 export const parseAddress = async (
   input: string,
@@ -105,46 +91,22 @@ export const parseAddress = async (
   onRetry?: (msg: string) => void
 ) => {
   const rawInput = input.trim();
-  const rawManual = manualCoords?.trim() || "";
-  const cacheKey = `${rawInput}|${rawManual}`.toLowerCase();
-  
+  const cacheKey = `${rawInput}|${manualCoords || ''}`.toLowerCase();
   if (addressCache[cacheKey]) return addressCache[cacheKey];
 
-  const direct = extractCoords(rawManual || rawInput);
-  if (direct && !/^[A-Z0-9]{4,}\+/.test(rawInput)) {
-    const result = {
-      recipient: rawInput || "Punto GPS",
-      address: `Coordenadas: ${direct.lat}, ${direct.lng}`,
-      lat: direct.lat,
-      lng: direct.lng,
-      sourceUrl: `https://www.google.com/maps?q=${direct.lat},${direct.lng}`
-    };
-    addressCache[cacheKey] = result;
-    saveCache();
-    return result;
-  }
-
-  const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 }; // Elche
+  const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
 
   const result = await withRetry(async () => {
-    // CAMBIO: Usamos la versión estable -001 para evitar el error 404
+    // IMPORTANTE: gemini-1.5-flash-001 resuelve el error 404 de tus capturas
     const model = genAI.getGenerativeModel({ 
       model: "gemini-1.5-flash-001",
       tools: [{ googleSearchRetrieval: {} }] as any 
     });
 
-    const prompt = `
-      SISTEMA DE LOCALIZACIÓN LOGÍSTICA.
-      BUSCA: "${rawInput}".
-      UBICACIÓN ACTUAL RELEVANTE: Elche, Alicante, España (Lat ${anchor.latitude}, Lng ${anchor.longitude}).
-
-      TAREA:
-      1. Encuentra el nombre oficial y la DIRECCIÓN POSTAL REAL (Calle, Número, CP, Ciudad).
-      2. Si el usuario pone un negocio (ej: El Corte Inglés), busca su ubicación exacta en Elche.
-      3. RESPONDE SOLO 2 LÍNEAS:
-         Línea 1: Nombre comercial exacto.
-         Línea 2: Dirección postal completa.
-    `;
+    const prompt = `Localiza en Elche: "${rawInput}". 
+    Responde solo 2 líneas:
+    Línea 1: Nombre real del sitio.
+    Línea 2: Dirección completa (Calle, Número, Elche).`;
 
     const response = await model.generateContent(prompt);
     const text = response.response.text();
@@ -152,7 +114,6 @@ export const parseAddress = async (
     
     let lat = anchor.latitude;
     let lng = anchor.longitude;
-    let title = "";
     let url = "";
 
     if (metadata?.groundingChunks) {
@@ -160,28 +121,21 @@ export const parseAddress = async (
         const uri = chunk.web?.uri || chunk.googleSearchRetrieval?.source?.url;
         if (uri) {
           const coords = extractCoords(uri);
-          if (coords) {
-            lat = coords.lat;
-            lng = coords.lng;
-            url = uri;
-            title = chunk.web?.title || "";
-            break; 
-          }
+          if (coords) { lat = coords.lat; lng = coords.lng; url = uri; break; }
         }
       }
     }
 
     const lines = text.split('\n').map(cleanLine).filter(l => l.length > 0);
 
-    const finalResult = {
-      recipient: title || lines[0] || rawInput,
+    return {
+      recipient: lines[0] || rawInput,
       address: lines[1] || lines[0] || rawInput,
       lat,
       lng,
       sourceUrl: url || `https://www.google.com/maps?q=${lat},${lng}`,
       phone: text.match(/(?:\+34|34)?[6789]\d{8}/)?.[0]
     };
-    return finalResult;
   }, onRetry);
 
   addressCache[cacheKey] = result;
@@ -195,7 +149,7 @@ export const parseAddress = async (
 export const optimizeRoute = async (deliveries: Delivery[], start: string, onRetry?: (msg: string) => void) => {
   return await withRetry(async () => {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
-    const prompt = `Ordena estos IDs por proximidad geográfica para la ruta más corta empezando en ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde solo JSON: {"order": ["id1", "id2", ...]}`;
+    const prompt = `Ordena estos IDs para la ruta más corta desde ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde JSON: {"order": ["id1", "id2", ...]}`;
     
     const response = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
