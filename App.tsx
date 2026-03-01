@@ -4,7 +4,7 @@ import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, Layou
 import MapView  from './MapView';
 import DeliveryCard  from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
-import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
+import { parseAddress, optimizeRoute } from './geminiService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
