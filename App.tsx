@@ -3,7 +3,8 @@ import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, Layou
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
-import { parseAddress, optimizeRoute } from './geminiService';
+// IMPORTANTE: Añadida la importación de buildSearchQuery para evitar errores de compilación
+import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -99,7 +100,6 @@ const App: React.FC = () => {
     }
   };
 
-  // FUNCIÓN CORREGIDA: Eliminado buildSearchQuery y simplificado el flujo
   const handleAddDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isParsing) return;
@@ -113,21 +113,20 @@ const App: React.FC = () => {
       return;
     }
 
-    // Combinar nombre y dirección para la búsqueda inteligente
-    const fullSearchQuery = `${name} ${address}`.trim();
+    // Usamos la función del servicio para construir la búsqueda
+    const fullSearchQuery = buildSearchQuery(name, address);
 
     setIsParsing(true);
     setParsingMessage("Búsqueda inteligente...");
 
     try {
-      // Llamada directa al servicio depurado
       const parsed = await parseAddress(fullSearchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
       
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: parsed.recipient, // Usamos el nombre oficial encontrado por la IA
-        address: parsed.address,     // Aquí vendrá "Alcalde Ramón Pastor 2"
+        recipient: parsed.recipient,
+        address: parsed.address,
         phone: newPhoneInput.trim() || parsed.phone || '',
         coordinates: [parsed.lat, parsed.lng],
         status: DeliveryStatus.PENDING,
@@ -138,7 +137,6 @@ const App: React.FC = () => {
       
       setDeliveries(prev => [...prev, newDelivery]);
       
-      // Limpieza de estados
       setConceptInput('');
       setNewNameInput('');
       setNewAddressInput('');
@@ -171,7 +169,6 @@ const App: React.FC = () => {
 
   const handleMarkerClick = (id: string) => {
     setSelectedId(id);
-    // Si ya está seleccionado, lo quitamos de la secuencia (toggle)
     setManualSequence(prev => {
       if (prev.includes(id)) return prev.filter(sid => sid !== id);
       return [...prev, id];
