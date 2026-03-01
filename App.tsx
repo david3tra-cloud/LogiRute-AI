@@ -3,7 +3,8 @@ import { Plus, Loader2, X, Truck, MapPin, Mic, Power } from 'lucide-react';
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
-import { parseAddress } from './geminiService';
+// 👇 CAMBIO: usar Groq en vez de Gemini
+import { parseAddress } from './groqService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -37,7 +38,6 @@ const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
 
-  // ESTADOS UNIFICADOS DEL FORM
   const [conceptInput, setConceptInput] = useState('');
   const [unifiedInput, setUnifiedInput] = useState('');
   const [newPhoneInput, setNewPhoneInput] = useState('');
@@ -54,7 +54,6 @@ const App: React.FC = () => {
 
   const recognitionRef = useRef<any>(null);
 
-  // Persistencia en localStorage
   useEffect(() => {
     if (isAppClosed) return;
     try {
@@ -66,7 +65,6 @@ const App: React.FC = () => {
     }
   }, [deliveries, manualSequence, viewMode, isAppClosed]);
 
-  // Geolocalización + SpeechRecognition
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
