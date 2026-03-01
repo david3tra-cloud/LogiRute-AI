@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Delivery } from "../types";
 
 // Persistent cache in localStorage to avoid re-searching the same locations across sessions
@@ -17,7 +16,6 @@ let addressCache: Record<string, any> = getInitialCache();
 
 const saveCache = () => {
   try {
-    // Keep cache size reasonable (max 100 entries)
     const keys = Object.keys(addressCache);
     if (keys.length > 100) {
       delete addressCache[keys[0]];
@@ -28,7 +26,6 @@ const saveCache = () => {
   }
 };
 
-// Sinónimos y palabras clave por tipo de negocio
 const BUSINESS_SYNONYMS: Record<string, string[]> = {
   'zapato': ['zapatería', 'tienda zapatos', 'calzado', 'shoes store'],
   'farmacia': ['pharmacy', 'medicinas', 'recetas'],
@@ -44,10 +41,8 @@ function expandSearchTerms(name: string, address: string = ''): string[] {
   const normalizedName = normalizeText(name);
   const normalizedAddr = normalizeText(address);
   const combined = `${normalizedName} ${normalizedAddr}`;
-
   let expanded = [combined];
 
-  // Detecta palabras clave y expande
   for (const [keyword, synonyms] of Object.entries(BUSINESS_SYNONYMS)) {
     if (combined.includes(keyword)) {
       synonyms.forEach(syn => {
@@ -56,7 +51,6 @@ function expandSearchTerms(name: string, address: string = ''): string[] {
       break;
     }
   }
-
   return expanded.filter(q => q.length > 0);
 }
 
@@ -64,15 +58,8 @@ export const buildSearchQuery = (name: string, address: string = ''): string[] =
   return expandSearchTerms(name, address);
 };
 
-
-/**
- * Espera un tiempo determinado para reintentos.
- */
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Envoltorio con reintentos para manejar errores de cuota (429).
- */
 async function withRetry<T>(
   fn: () => Promise<T>, 
   onRetry?: (msg: string) => void,
@@ -98,25 +85,16 @@ async function withRetry<T>(
   throw lastError;
 }
 
-/**
- * Extrae coordenadas de cualquier texto, URL o formato lat,lng.
- */
 const extractCoords = (text: string) => {
   if (!text) return null;
-  
-  // Normalizar comas decimales: "38,2805" -> "38.2805"
   let normalized = text.trim().replace(/(\d),(\d)/g, '$1.$2');
-
   const coordPattern = /([-+]?\d+\.?\d*)\s*[,; \t]\s*([-+]?\d+\.?\d*)/;
   const match = normalized.match(coordPattern);
   
   if (match) {
     const lat = parseFloat(match[1]);
     const lng = parseFloat(match[2]);
-    
-    if (!isNaN(lat) && !isNaN(lng) && 
-        lat >= -90 && lat <= 90 && 
-        lng >= -180 && lng <= 180) {
+    if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
       return { lat, lng };
     }
   }
@@ -135,20 +113,14 @@ const extractCoords = (text: string) => {
       if (!isNaN(lat) && !isNaN(lng)) return { lat, lng };
     }
   }
-  
   return null;
 };
 
-const isPlusCode = (text: string) => {
-  return /^[A-Z0-9]{4,8}\+[A-Z0-9]{2,}/.test(text.trim().toUpperCase());
-};
-
-const isUrl = (text: string) => {
-  return /^https?:\/\//i.test(text.trim());
-};
+const isPlusCode = (text: string) => /^[A-Z0-9]{4,8}\+[A-Z0-9]{2,}/.test(text.trim().toUpperCase());
+const isUrl = (text: string) => /^https?:\/\//i.test(text.trim());
 
 /**
- * Busca un sitio usando Gemini 2.5 con Maps Grounding afinado.
+ * Busca un sitio usando Gemini 1.5 Flash con Grounding.
  */
 export const parseAddress = async (
   input: string,
@@ -167,12 +139,8 @@ export const parseAddress = async (
   const rawManual = manualCoords?.trim() || "";
   const cacheKey = `${rawInput}|${rawManual}`.toLowerCase();
   
-  // 1. Check persistent cache first
-  if (addressCache[cacheKey]) {
-    return addressCache[cacheKey];
-  }
+  if (addressCache[cacheKey]) return addressCache[cacheKey];
 
-  // 2. Local check for coordinates (No API call needed)
   const directCoords = extractCoords(rawManual || rawInput);
   if (directCoords && !isPlusCode(rawManual || rawInput)) {
     const isCoordinateOnly = !rawInput || extractCoords(rawInput);
@@ -181,50 +149,41 @@ export const parseAddress = async (
       address: isCoordinateOnly ? `Ubicación: ${directCoords.lat}, ${directCoords.lng}` : rawInput,
       lat: directCoords.lat,
       lng: directCoords.lng,
-      sourceUrl: isUrl(rawManual) ? rawManual : `https://www.google.com/maps/dir/?api=1&destination=${directCoords.lat},${directCoords.lng}`
+      sourceUrl: isUrl(rawManual) ? rawManual : `https://www.google.com/maps?q=${directCoords.lat},${directCoords.lng}`
     };
     addressCache[cacheKey] = result;
     saveCache();
     return result;
   }
 
-  // 3. Plus Code Check (If it's a raw plus code, we might still need grounding to get the full address/name)
-  // However, if we reach here, we likely need the API to resolve the business name/address.
-
-  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
+  const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+  // Elche por defecto como tenías
+  const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
 
   const result = await withRetry(async () => {
+    // Usamos gemini-1.5-flash que es el modelo actual con soporte estable
+    const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-flash",
+        tools: [{ googleSearchRetrieval: {} }] as any 
+    });
+
     const prompt = `
       ESTO ES UNA OPERACIÓN DE REPARTO LOGÍSTICO CRÍTICA.
       Consulta: "${rawManual || rawInput}".
       Ubicación de referencia: Lat: ${anchor.latitude}, Lng: ${anchor.longitude}.
-
       OBJETIVO: Identificar el local comercial o industrial exacto.
-      
       REGLAS:
-      1. MAPEO DE MARCAS: Si el usuario busca una marca (ej: "Paredes", "Pacal Shoes"), busca la TIENDA u OUTLET oficial más relevante en el área local.
+      1. MAPEO DE MARCAS: Si el usuario busca una marca (ej: "Paredes"), busca la TIENDA oficial local.
       2. RESOLUCIÓN DE ALIAS: Busca el nombre comercial real según Google Maps.
       3. FORMATO: 
          Línea 1: NOMBRE OFICIAL.
          Línea 2: DIRECCIÓN POSTAL COMPLETA.
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ googleMaps: {} }],
-        toolConfig: {
-          retrievalConfig: {
-            latLng: { latitude: anchor.latitude, longitude: anchor.longitude }
-          }
-        },
-      },
-    });
-
-    const text = response.text || "";
-    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    const response = await model.generateContent(prompt);
+    const text = response.response.text() || "";
+    const metadata = response.response.candidates?.[0]?.groundingMetadata;
+    const chunks = metadata?.groundingChunks;
     
     let lat: number | null = null;
     let lng: number | null = null;
@@ -234,39 +193,39 @@ const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 };
     if (chunks && chunks.length > 0) {
       const searchWords = rawInput.toLowerCase().split(/\s+/).filter(w => w.length > 2);
       for (const c of chunks) {
-        if (c.maps?.uri) {
-          const cData = extractCoords(c.maps.uri);
-          if (cData) {
-            const currentTitle = (c.maps.title || "").toLowerCase();
-            const score = searchWords.reduce((acc, word) => acc + (currentTitle.includes(word) ? 1 : 0), 0);
-            if (!lat || score > 0) {
-              lat = cData.lat;
-              lng = cData.lng;
-              url = c.maps.uri;
-              title = c.maps.title || title;
-              if (score >= searchWords.length && score > 0) break;
-            }
-          }
+        if (c.googleSearchRetrieval?.source?.url || c.web?.uri) {
+           const uri = c.googleSearchRetrieval?.source?.url || c.web?.uri;
+           const cData = extractCoords(uri);
+           if (cData) {
+             const currentTitle = (c.web?.title || "").toLowerCase();
+             const score = searchWords.reduce((acc, word) => acc + (currentTitle.includes(word) ? 1 : 0), 0);
+             if (!lat || score > 0) {
+               lat = cData.lat;
+               lng = cData.lng;
+               url = uri;
+               title = c.web?.title || title;
+               if (score >= searchWords.length && score > 0) break;
+             }
+           }
         }
       }
     }
 
-  if (!lat || !lng) {
-  const fallback = extractCoords(text);
-  if (fallback) { lat = fallback.lat; lng = fallback.lng; }
-}
+    if (!lat || !lng) {
+      const fallback = extractCoords(text);
+      if (fallback) { lat = fallback.lat; lng = fallback.lng; }
+    }
 
-if (!lat || !lng) {
-  // Si no hay coordenadas claras, devolvemos un punto aproximado sin romper el flujo.
-  return {
-    recipient: rawInput || "Destino sin coordenadas claras",
-    address: rawInput || "Sin dirección precisa",
-    lat: anchor.latitude,
-    lng: anchor.longitude,
-    sourceUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rawInput || "destino")}`,
-    phone: undefined
-  };
-}
+    if (!lat || !lng) {
+      return {
+        recipient: rawInput || "Destino sin coordenadas",
+        address: rawInput || "Sin dirección precisa",
+        lat: anchor.latitude,
+        lng: anchor.longitude,
+        sourceUrl: `https://www.google.com/maps?q=${encodeURIComponent(rawInput || "destino")}`,
+        phone: undefined
+      };
+    }
 
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
@@ -275,7 +234,7 @@ if (!lat || !lng) {
       address: lines[1] || lines[0] || rawInput,
       lat,
       lng,
-      sourceUrl: url || `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`,
+      sourceUrl: url || `https://www.google.com/maps?q=${lat},${lng}`,
       phone: text.match(/(?:\+34|34)?[6789]\d{8}/)?.[0]
     };
   }, onRetry);
@@ -285,7 +244,6 @@ if (!lat || !lng) {
   return result;
 };
 
-// Simple route hash to avoid re-optimizing the exact same list
 let lastRouteHash = "";
 
 export const optimizeRoute = async (deliveries: Delivery[], start: string, onRetry?: (msg: string) => void) => {
@@ -294,21 +252,16 @@ export const optimizeRoute = async (deliveries: Delivery[], start: string, onRet
     return addressCache['last_route_order'];
   }
 
-  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-const result = await withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `Ordena estos IDs para la ruta más corta empezando en ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde solo JSON: {"order": ["id1", "id2", ...]}`,
-      config: {
+  const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+  const result = await withRetry(async () => {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const response = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: `Ordena estos IDs para la ruta más corta empezando en ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde solo JSON: {"order": ["id1", "id2", ...]}` }] }],
+      generationConfig: {
         responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: { order: { type: Type.ARRAY, items: { type: Type.STRING } } },
-          required: ["order"]
-        }
       }
     });
-    return JSON.parse(response.text).order as string[];
+    return JSON.parse(response.response.text()).order as string[];
   }, onRetry);
 
   lastRouteHash = routeHash;
