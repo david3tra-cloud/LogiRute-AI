@@ -1,8 +1,7 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, LayoutGrid, LogOut, CheckCircle2, ArrowDownLeft, ArrowUpRight, Clock, AlertTriangle, Truck, Phone, RotateCcw, Settings2, BarChart3, Package, Archive, Mic, MapPin, Power, RefreshCcw, User, Tag } from 'lucide-react';
-import MapView  from './MapView';
-import DeliveryCard  from './DeliveryCard';
+import { Plus, Loader2, X, LogOut, Package, AlertTriangle, Clock, Truck, Phone, Power, RefreshCcw, User, Tag, Mic, MapPin } from 'lucide-react';
+import MapView from './MapView';
+import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
 import { parseAddress, optimizeRoute } from './geminiService';
 
@@ -100,6 +99,7 @@ const App: React.FC = () => {
     }
   };
 
+  // FUNCIÓN CORREGIDA: Eliminado buildSearchQuery y simplificado el flujo
   const handleAddDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isParsing) return;
@@ -113,30 +113,21 @@ const App: React.FC = () => {
       return;
     }
 
-    // Check for potential duplicate in existing list before calling API
-    const exists = deliveries.find(d => 
-      (name && d.recipient.toLowerCase() === name.toLowerCase()) || 
-      (coords && d.sourceUrl?.includes(coords))
-    );
-    
-    if (exists && !window.confirm(`Ya tienes una parada para "${exists.recipient}". ¿Añadir duplicado?`)) {
-      setIsAdding(false);
-      return;
-    }
+    // Combinar nombre y dirección para la búsqueda inteligente
+    const fullSearchQuery = `${name} ${address}`.trim();
 
     setIsParsing(true);
     setParsingMessage("Búsqueda inteligente...");
 
     try {
-const queries = buildSearchQuery(name, address);
-    const searchQuery = queries[0];
-      const parsed = await parseAddress(searchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
+      // Llamada directa al servicio depurado
+      const parsed = await parseAddress(fullSearchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
       
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: name || parsed.recipient,
-        address: parsed.address,
+        recipient: parsed.recipient, // Usamos el nombre oficial encontrado por la IA
+        address: parsed.address,     // Aquí vendrá "Alcalde Ramón Pastor 2"
         phone: newPhoneInput.trim() || parsed.phone || '',
         coordinates: [parsed.lat, parsed.lng],
         status: DeliveryStatus.PENDING,
@@ -147,7 +138,7 @@ const queries = buildSearchQuery(name, address);
       
       setDeliveries(prev => [...prev, newDelivery]);
       
-      // Cleanup
+      // Limpieza de estados
       setConceptInput('');
       setNewNameInput('');
       setNewAddressInput('');
@@ -156,7 +147,7 @@ const queries = buildSearchQuery(name, address);
       setIsAdding(false);
       setSelectedId(newDelivery.id);
     } catch (error: any) {
-      alert(error.message);
+      alert(error.message || "Error al procesar la parada");
     } finally {
       setIsParsing(false);
       setParsingMessage(null);
@@ -180,6 +171,7 @@ const queries = buildSearchQuery(name, address);
 
   const handleMarkerClick = (id: string) => {
     setSelectedId(id);
+    // Si ya está seleccionado, lo quitamos de la secuencia (toggle)
     setManualSequence(prev => {
       if (prev.includes(id)) return prev.filter(sid => sid !== id);
       return [...prev, id];
@@ -191,7 +183,7 @@ const queries = buildSearchQuery(name, address);
     if (pending.length < 2) return;
     setIsOptimizing(true);
     try {
-      const start = currentUserLoc ? `${currentUserLoc.latitude},${currentUserLoc.longitude}` : "Mi ubicación";
+      const start = currentUserLoc ? `${currentUserLoc.latitude},${currentUserLoc.longitude}` : "Elche, Alicante";
       const resultIds = await optimizeRoute(pending, start);
       setManualSequence(resultIds);
     } catch (e: any) {
@@ -372,7 +364,7 @@ const queries = buildSearchQuery(name, address);
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Nombre / Comercio</label>
                 <div className="relative">
                   <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
-                  <input type="text" value={newNameInput} onChange={(e) => setNewNameInput(e.target.value)} className="w-full pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold" placeholder="Ej: Pacal Shoes Elche" />
+                  <input type="text" value={newNameInput} onChange={(e) => setNewNameInput(e.target.value)} className="w-full pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold" placeholder="Ej: El Corte Inglés" />
                   <button type="button" onClick={() => toggleListening('name')} className={`absolute right-2 top-1/2 -translate-y-1/2 p-2.5 rounded-xl ${isListening && activeMicField === 'name' ? 'bg-red-500 text-white animate-pulse' : 'text-slate-300'}`}><Mic size={18} /></button>
                 </div>
               </div>
