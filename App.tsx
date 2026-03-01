@@ -1,10 +1,10 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Map as MapIcon, List, BrainCircuit, Loader2, X, Navigation, LayoutGrid, LogOut, CheckCircle2, ArrowDownLeft, ArrowUpRight, Clock, AlertTriangle, Truck, Phone, RotateCcw, Settings2, BarChart3, Package, Archive, Mic, MapPin, Power, RefreshCcw, User, Tag } from 'lucide-react';
-import MapView from './MapView';
-import DeliveryCard from './DeliveryCard';
+import MapView from './components/MapView';
+import DeliveryCard from './components/DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
-// IMPORTANTE: Añadida la importación de buildSearchQuery para evitar errores de compilación
-import { parseAddress, optimizeRoute, buildSearchQuery } from './geminiService';
+import { parseAddress, optimizeRoute, buildSearchQuery } from './services/geminiService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -30,8 +30,7 @@ const App: React.FC = () => {
   const [isAdding, setIsAdding] = useState(false);
   
   const [conceptInput, setConceptInput] = useState('');
-  const [newNameInput, setNewNameInput] = useState('');
-  const [newAddressInput, setNewAddressInput] = useState('');
+  const [newSearchInput, setNewSearchInput] = useState('');
   const [newPhoneInput, setNewPhoneInput] = useState('');
   const [newCoordsInput, setNewCoordsInput] = useState('');
   
@@ -40,7 +39,7 @@ const App: React.FC = () => {
   const [isParsing, setIsParsing] = useState(false);
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
-  const [activeMicField, setActiveMicField] = useState<'name' | 'address' | null>(null);
+  const [activeMicField, setActiveMicField] = useState<'search' | null>(null);
   const [isAppClosed, setIsAppClosed] = useState(false);
   const [currentUserLoc, setCurrentUserLoc] = useState<{latitude: number, longitude: number} | undefined>(undefined);
   
@@ -71,10 +70,8 @@ const App: React.FC = () => {
 
       recognition.onresult = (event: any) => {
         const transcript = event.results[0][0].transcript;
-        if (activeMicField === 'name') {
-          setNewNameInput(prev => prev ? `${prev} ${transcript}` : transcript);
-        } else if (activeMicField === 'address') {
-          setNewAddressInput(prev => prev ? `${prev} ${transcript}` : transcript);
+        if (activeMicField === 'search') {
+          setNewSearchInput(prev => prev ? `${prev} ${transcript}` : transcript);
         }
         setIsListening(false);
         setActiveMicField(null);
@@ -86,7 +83,7 @@ const App: React.FC = () => {
     }
   }, [activeMicField]);
 
-  const toggleListening = (field: 'name' | 'address') => {
+  const toggleListening = (field: 'search') => {
     if (!recognitionRef.current) {
       alert("Tu navegador no soporta reconocimiento de voz.");
       return;
@@ -104,28 +101,35 @@ const App: React.FC = () => {
     e.preventDefault();
     if (isParsing) return;
 
-    const name = newNameInput.trim();
-    const address = newAddressInput.trim();
+    const search = newSearchInput.trim();
     const coords = newCoordsInput.trim();
 
-    if (!name && !address && !coords) {
+    if (!search && !coords) {
       alert("Introduce algún dato de búsqueda.");
       return;
     }
 
-    // Usamos la función del servicio para construir la búsqueda
-    const fullSearchQuery = buildSearchQuery(name, address);
+    // Check for potential duplicate in existing list before calling API
+    const exists = deliveries.find(d => 
+      (search && d.recipient.toLowerCase() === search.toLowerCase()) || 
+      (coords && d.sourceUrl?.includes(coords))
+    );
+    
+    if (exists && !window.confirm(`Ya tienes una parada para "${exists.recipient}". ¿Añadir duplicado?`)) {
+      setIsAdding(false);
+      return;
+    }
 
     setIsParsing(true);
     setParsingMessage("Búsqueda inteligente...");
 
     try {
-      const parsed = await parseAddress(fullSearchQuery, currentUserLoc, coords, (msg) => setParsingMessage(msg));
+      const parsed = await parseAddress(search, currentUserLoc, coords, (msg) => setParsingMessage(msg));
       
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: parsed.recipient,
+        recipient: parsed.recipient || search,
         address: parsed.address,
         phone: newPhoneInput.trim() || parsed.phone || '',
         coordinates: [parsed.lat, parsed.lng],
@@ -137,15 +141,16 @@ const App: React.FC = () => {
       
       setDeliveries(prev => [...prev, newDelivery]);
       
+      // Cleanup
       setConceptInput('');
-      setNewNameInput('');
-      setNewAddressInput('');
+      setNewSearchInput('');
       setNewPhoneInput('');
       setNewCoordsInput('');
       setIsAdding(false);
       setSelectedId(newDelivery.id);
     } catch (error: any) {
-      alert(error.message || "Error al procesar la parada");
+      console.error("Error adding delivery:", error);
+      alert(error.message || "Error al buscar la dirección. Inténtalo de nuevo.");
     } finally {
       setIsParsing(false);
       setParsingMessage(null);
@@ -180,7 +185,7 @@ const App: React.FC = () => {
     if (pending.length < 2) return;
     setIsOptimizing(true);
     try {
-      const start = currentUserLoc ? `${currentUserLoc.latitude},${currentUserLoc.longitude}` : "Elche, Alicante";
+      const start = currentUserLoc ? `${currentUserLoc.latitude},${currentUserLoc.longitude}` : "Mi ubicación";
       const resultIds = await optimizeRoute(pending, start);
       setManualSequence(resultIds);
     } catch (e: any) {
@@ -248,10 +253,45 @@ const App: React.FC = () => {
           <div className="flex-1 p-6 md:p-12 overflow-y-auto bg-slate-50">
              <div className="max-w-5xl mx-auto space-y-10">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-                <h2 className="text-4xl font-black text-slate-800 tracking-tighter uppercase">Panel de Control</h2>
-                <button onClick={handleClearAll} className="bg-red-600 text-white px-8 py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase">
-                  <LogOut size={20} /> Cerrar Sesión
-                </button>
+                <div className="flex flex-col">
+                  <h2 className="text-4xl font-black text-slate-800 tracking-tighter uppercase">Panel de Control</h2>
+                  <div className="flex items-center gap-2 mt-1">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Versión 12.0 (Maps Native)</p>
+                    <span className="text-[8px] bg-slate-200 px-2 py-0.5 rounded text-slate-500 font-mono">
+                      KEY: {process.env.GEMINI_API_KEY ? `${process.env.GEMINI_API_KEY.substring(0, 6)}...` : 'MISSING'}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => {
+                      if (window.confirm("¿REPARAR APLICACIÓN? Esto forzará una limpieza profunda de la memoria y reiniciará la app.")) {
+                        // Clear all caches
+                        if ('serviceWorker' in navigator) {
+                          navigator.serviceWorker.getRegistrations().then(registrations => {
+                            for(let registration of registrations) registration.unregister();
+                          });
+                        }
+                        if (window.caches) {
+                          caches.keys().then(names => {
+                            for (let name of names) caches.delete(name);
+                          });
+                        }
+                        // Clear storage
+                        localStorage.clear();
+                        sessionStorage.clear();
+                        // Hard reload with cache busting
+                        window.location.href = window.location.origin + window.location.pathname + '?v=' + Date.now();
+                      }
+                    }}
+                    className="bg-amber-500 text-white px-6 py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-amber-600 transition-all uppercase text-xs"
+                  >
+                    <RefreshCcw size={18} /> Reparar App
+                  </button>
+                  <button onClick={handleClearAll} className="bg-red-600 text-white px-8 py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs">
+                    <LogOut size={20} /> Cerrar Sesión
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-8">
                 <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
@@ -358,19 +398,11 @@ const App: React.FC = () => {
               </div>
 
               <div className="space-y-2">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Nombre / Comercio</label>
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Nombre, Comercio o Dirección</label>
                 <div className="relative">
-                  <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
-                  <input type="text" value={newNameInput} onChange={(e) => setNewNameInput(e.target.value)} className="w-full pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold" placeholder="Ej: El Corte Inglés" />
-                  <button type="button" onClick={() => toggleListening('name')} className={`absolute right-2 top-1/2 -translate-y-1/2 p-2.5 rounded-xl ${isListening && activeMicField === 'name' ? 'bg-red-500 text-white animate-pulse' : 'text-slate-300'}`}><Mic size={18} /></button>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Dirección o Referencia</label>
-                <div className="relative">
-                  <textarea value={newAddressInput} onChange={(e) => setNewAddressInput(e.target.value)} className="w-full h-20 p-6 border-2 border-slate-100 rounded-[30px] outline-none focus:border-blue-500 font-medium resize-none" placeholder="Opcional..." />
-                  <button type="button" onClick={() => toggleListening('address')} className={`absolute right-4 bottom-4 p-4 rounded-2xl ${isListening && activeMicField === 'address' ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-100 text-slate-400'}`}><Mic size={20} /></button>
+                  <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
+                  <input type="text" value={newSearchInput} onChange={(e) => setNewSearchInput(e.target.value)} className="w-full pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold" placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10" />
+                  <button type="button" onClick={() => toggleListening('search')} className={`absolute right-2 top-1/2 -translate-y-1/2 p-2.5 rounded-xl ${isListening && activeMicField === 'search' ? 'bg-red-500 text-white animate-pulse' : 'text-slate-300'}`}><Mic size={18} /></button>
                 </div>
               </div>
 
@@ -385,7 +417,7 @@ const App: React.FC = () => {
                 </div>
               </div>
               
-              <button type="submit" disabled={isParsing || (!newNameInput.trim() && !newAddressInput.trim() && !newCoordsInput.trim())} className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4">
+              <button type="submit" disabled={isParsing || (!newSearchInput.trim() && !newCoordsInput.trim())} className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4">
                 {isParsing ? (
                   <div className="flex flex-col items-center">
                     <Loader2 className="animate-spin" size={24} />
