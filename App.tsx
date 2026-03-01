@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Loader2, X, LogOut, Package, AlertTriangle, Clock, Truck, Phone, Power, RefreshCcw, User, Tag, Mic, MapPin } from 'lucide-react';
+import { Plus, Loader2, X, LogOut, Package, AlertTriangle, Clock, Truck, Phone, Power, RefreshCcw, User, Tag, Mic, MapPin, BrainCircuit, LayoutGrid, List, Map as MapIcon, Navigation, Settings2, BarChart3, Archive, RotateCcw } from 'lucide-react';
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
