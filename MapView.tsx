@@ -1,6 +1,6 @@
-
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
+import 'leaflet/dist/leaflet.css'; // ¡No olvides importar el CSS!
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
 
 interface MapViewProps {
@@ -21,6 +21,7 @@ const MapView: React.FC<MapViewProps> = ({
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
   const polylineRef = useRef<L.Polyline | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const isValidLatLng = (coords: any): coords is [number, number] => {
     return (
@@ -35,198 +36,160 @@ const MapView: React.FC<MapViewProps> = ({
     );
   };
 
+  // 1. Inicialización Única con Limpieza
   useEffect(() => {
-    if (!mapRef.current) {
-      const mapContainer = document.getElementById('map-container');
-      if (!mapContainer) return;
+    if (!containerRef.current || mapRef.current) return;
 
-      mapRef.current = L.map(mapContainer, {
-        zoomControl: false,
-        fadeAnimation: true,
-        markerZoomAnimation: true,
-      }).setView([40.4168, -3.7126], 13);
+    const map = L.map(containerRef.current, {
+      zoomControl: false,
+      fadeAnimation: true,
+      markerZoomAnimation: true,
+    }).setView([40.4168, -3.7126], 13);
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors',
-      }).addTo(mapRef.current);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(map);
 
-      L.control.zoom({ position: 'bottomright' }).addTo(mapRef.current);
-    }
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    mapRef.current = map;
+
+    // LIMPIEZA: Fundamental para evitar el error "Map container is already initialized"
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+    };
   }, []);
 
-  // Arregla problemas de tamaño del mapa al cambiar de vista / móvil
+  // 2. Invalidate Size (Manejo de redimensionado)
   useEffect(() => {
     if (!mapRef.current) return;
     const timer = setTimeout(() => {
-      try {
-        mapRef.current!.invalidateSize({ animate: true });
-      } catch (e) {
-        console.warn('Invalidate size failed', e);
-      }
+      mapRef.current?.invalidateSize();
     }, 300);
     return () => clearTimeout(timer);
   }, [viewMode]);
 
-  // Pintar marcadores y ruta
+  // 3. Dibujado de Marcadores y Rutas
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Limpia marcadores anteriores
-    Object.values(markersRef.current).forEach((m) => {
-      try {
-        m.remove();
-      } catch (e) {
-        console.warn('Error removing marker', e);
-      }
-    });
+    // Limpiar marcadores
+    Object.values(markersRef.current).forEach(m => m.remove());
     markersRef.current = {};
 
-    // Limpia polilínea anterior
+    // Limpiar polilínea
     if (polylineRef.current) {
-      try {
-        polylineRef.current.remove();
-      } catch {}
+      polylineRef.current.remove();
       polylineRef.current = null;
     }
 
-    const validDeliveries = deliveries.filter((d) => isValidLatLng(d.coordinates));
+    const validDeliveries = deliveries.filter(d => isValidLatLng(d.coordinates));
 
-    console.log('MapView deliveries:', deliveries);
-    console.log(
-      'Valid deliveries for map:',
-      validDeliveries.map((d) => ({ id: d.id, coords: d.coordinates, address: d.address }))
-    );
-
-    // Dibuja la ruta si hay secuencia manual
+    // Dibujar Polilínea (Ruta)
     if (manualSequence.length >= 2) {
       const routePoints = manualSequence
-        .map((id) => validDeliveries.find((d) => d.id === id)?.coordinates)
+        .map(id => validDeliveries.find(d => d.id === id)?.coordinates)
         .filter((coords): coords is [number, number] => isValidLatLng(coords));
 
       if (routePoints.length >= 2) {
-        try {
-          polylineRef.current = L.polyline(routePoints, {
-            color: '#3b82f6',
-            weight: 5,
-            opacity: 0.7,
-            dashArray: '12, 12',
-            lineJoin: 'round',
-          }).addTo(map);
-        } catch (e) {
-          console.warn('Error drawing polyline', e);
-        }
+        polylineRef.current = L.polyline(routePoints, {
+          color: '#3b82f6',
+          weight: 4,
+          opacity: 0.6,
+          dashArray: '8, 12',
+          lineJoin: 'round',
+        }).addTo(map);
       }
     }
 
-    // Crear marcadores
+    // Crear Marcadores
     validDeliveries.forEach((delivery) => {
-      if (!isValidLatLng(delivery.coordinates)) return;
+      const isSelected = selectedId === delivery.id;
+      const sequenceIndex = manualSequence.indexOf(delivery.id);
+      const isOrdered = sequenceIndex !== -1;
 
+      // Lógica de colores (tu lógica original mantenida)
       let color = '#3b82f6';
       if (delivery.status === DeliveryStatus.COMPLETED) color = '#10b981';
       else if (delivery.status === DeliveryStatus.ISSUE) color = '#eab308';
       else if (delivery.type === DeliveryType.PICKUP) color = '#ef4444';
 
-      const isSelected = selectedId === delivery.id;
-      const sequenceIndex = manualSequence.indexOf(delivery.id);
-      const isOrdered = sequenceIndex !== -1;
-
-      const size = isSelected ? 34 : isOrdered ? 30 : 24;
-      const borderSize = isSelected ? '4px' : '3px';
-
+      const size = isSelected ? 34 : 28;
+      
       const icon = L.divIcon({
-        className: 'custom-div-icon',
+        className: 'custom-marker',
         html: `
           <div style="
             background-color: ${color};
             width: ${size}px;
             height: ${size}px;
-            border-radius: 12px;
-            border: ${borderSize} solid white;
-            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+            border-radius: 10px;
+            border: 3px solid white;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.2);
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
-            font-size: ${isSelected ? '14px' : '12px'};
+            font-size: ${isSelected ? '14px' : '11px'};
             font-weight: 900;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            transform: scale(${isSelected ? 1.1 : 1});
+            transform: ${isSelected ? 'scale(1.15)' : 'scale(1)'};
+            transition: transform 0.2s ease;
           ">
-            ${isOrdered && delivery.status !== DeliveryStatus.COMPLETED ? sequenceIndex + 1 : ''}
-            ${delivery.status === DeliveryStatus.COMPLETED ? '✓' : ''}
+            ${delivery.status === DeliveryStatus.COMPLETED ? '✓' : (isOrdered ? sequenceIndex + 1 : '')}
           </div>
         `,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       });
 
-      try {
-        const marker = L.marker(delivery.coordinates, {
-          icon,
-          zIndexOffset: isSelected ? 1000 : 0,
-        }).addTo(map);
+      const marker = L.marker(delivery.coordinates as [number, number], { 
+        icon,
+        zIndexOffset: isSelected ? 1000 : (isOrdered ? 500 : 0)
+      }).addTo(map);
 
-        marker.on('click', (e) => {
-          L.DomEvent.stopPropagation(e);
-          onMarkerClick(delivery.id);
-        });
+      marker.on('click', (e) => {
+        L.DomEvent.stopPropagation(e);
+        onMarkerClick(delivery.id);
+      });
 
-        const popupContent = document.createElement('div');
-        popupContent.className = 'p-1';
-        popupContent.innerHTML = `
-          <div class="font-black text-[11px] mb-0.5 uppercase tracking-tight">${delivery.recipient}</div>
-          <div class="text-[9px] text-slate-400 font-bold truncate max-w-[120px] uppercase">${delivery.address}</div>
-        `;
-
-        marker.bindPopup(popupContent, { offset: [0, -size / 2], closeButton: false });
-        markersRef.current[delivery.id] = marker;
-      } catch (e) {
-        console.error('Error creating marker', e);
-      }
+      // Popup optimizado
+      const popupHtml = `
+        <div style="text-align: center; min-width: 100px;">
+          <div style="font-weight: 800; font-size: 11px; text-transform: uppercase;">${delivery.recipient}</div>
+          <div style="font-size: 9px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${delivery.address}</div>
+        </div>
+      `;
+      marker.bindPopup(popupHtml, { offset: [0, -size / 2], closeButton: false });
+      
+      markersRef.current[delivery.id] = marker;
     });
 
-    // Ajustar el mapa a todos los puntos
-    if (validDeliveries.length > 0 && viewMode !== 'list') {
-      try {
-        const validCoords = validDeliveries
-          .map((d) => d.coordinates)
-          .filter((c) => isValidLatLng(c));
-        if (validCoords.length === 1) {
-          map.setView(validCoords[0], 16);
-        } else if (validCoords.length > 1) {
-          const bounds = L.latLngBounds(validCoords);
-          map.fitBounds(bounds, { padding: [100, 100], maxZoom: 16 });
-        }
-      } catch (e) {
-        console.warn('Could not fit bounds', e);
-      }
+    // Ajustar vista si no estamos en lista
+    if (validDeliveries.length > 0 && viewMode !== 'list' && !selectedId) {
+        const bounds = L.latLngBounds(validDeliveries.map(d => d.coordinates as [number, number]));
+        map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
     }
-  }, [deliveries, manualSequence, onMarkerClick, viewMode, selectedId]);
+  }, [deliveries, manualSequence, viewMode]); // Eliminamos selectedId y onMarkerClick de aquí para evitar saltos innecesarios
 
-  // Volar al marcador seleccionado
+  // 4. Efecto de "Vuelo" (FlyTo) independiente
   useEffect(() => {
-    if (!selectedId || !mapRef.current) return;
+    if (!selectedId || !mapRef.current || !markersRef.current[selectedId]) return;
+    
     const marker = markersRef.current[selectedId];
-    if (!marker) return;
-
-    try {
-      const latLng = marker.getLatLng();
-      if (!latLng || isNaN(latLng.lat) || isNaN(latLng.lng)) return;
-
-      mapRef.current.flyTo(latLng, 16, { duration: 1 });
-      marker.openPopup();
-    } catch (e) {
-      console.warn('FlyTo failed', e);
-    }
+    const latLng = marker.getLatLng();
+    
+    mapRef.current.flyTo(latLng, 16, { duration: 1.2 });
+    marker.openPopup();
   }, [selectedId]);
 
   return (
     <div
-      id="map-container"
+      ref={containerRef}
       className="h-full w-full bg-slate-100"
-      style={{ minHeight: '300px' }}
+      style={{ minHeight: '300px', position: 'relative' }}
     />
   );
 };
