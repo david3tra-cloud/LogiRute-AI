@@ -28,6 +28,14 @@ const saveCache = () => {
 };
 
 /**
+ * FUNCIÓN AÑADIDA: Necesaria para que App.tsx no dé error de "not defined"
+ */
+export const buildSearchQuery = (name: string, address: string): string[] => {
+  const query = `${name} ${address}`.trim();
+  return [query];
+};
+
+/**
  * Función de reintentos para manejar errores 429 (Límite de cuota)
  */
 async function withRetry<T>(
@@ -63,8 +71,8 @@ const extractCoords = (text: string) => {
   const normalized = text.trim().replace(/(\d),(\d)/g, '$1.$2');
   const patterns = [
     /([-+]?\d+\.\d+)\s*[,; \t]\s*([-+]?\d+\.\d+)/, // lat, lng puro
-    /@(-?\d+\.\d+),(-?\d+\.\d+)/,                 // formato URL @lat,lng
-    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/              // formato interno Maps
+    /@(-?\d+\.\d+),(-?\d+\.\d+)/,                  // formato URL @lat,lng
+    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/               // formato interno Maps
   ];
   
   for (const pattern of patterns) {
@@ -79,7 +87,7 @@ const extractCoords = (text: string) => {
 };
 
 /**
- * Limpia etiquetas de la IA (ej: "Dirección: Calle...") para dejar solo el dato
+ * Limpia etiquetas de la IA (ej: "Dirección: Calle...")
  */
 const cleanLine = (text: string) => {
   return text
@@ -102,7 +110,6 @@ export const parseAddress = async (
   
   if (addressCache[cacheKey]) return addressCache[cacheKey];
 
-  // Coordenadas manuales directas
   const direct = extractCoords(rawManual || rawInput);
   if (direct && !/^[A-Z0-9]{4,}\+/.test(rawInput)) {
     const result = {
@@ -120,8 +127,9 @@ export const parseAddress = async (
   const anchor = userLocation || { latitude: 38.2622, longitude: -0.6993 }; // Elche
 
   const result = await withRetry(async () => {
+    // CAMBIO: Usamos la versión estable -001 para evitar el error 404
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
+      model: "gemini-1.5-flash-001",
       tools: [{ googleSearchRetrieval: {} }] as any 
     });
 
@@ -132,7 +140,7 @@ export const parseAddress = async (
 
       TAREA:
       1. Encuentra el nombre oficial y la DIRECCIÓN POSTAL REAL (Calle, Número, CP, Ciudad).
-      2. Si el usuario pone un negocio (ej: El Corte Inglés), ignora el alias y busca su ubicación exacta en Elche.
+      2. Si el usuario pone un negocio (ej: El Corte Inglés), busca su ubicación exacta en Elche.
       3. RESPONDE SOLO 2 LÍNEAS:
          Línea 1: Nombre comercial exacto.
          Línea 2: Dirección postal completa.
@@ -140,14 +148,13 @@ export const parseAddress = async (
 
     const response = await model.generateContent(prompt);
     const text = response.response.text();
-    const metadata = response.response.candidates?.[0]?.groundingMetadata;
+    const metadata = (response.response.candidates?.[0] as any)?.groundingMetadata;
     
     let lat = anchor.latitude;
     let lng = anchor.longitude;
     let title = "";
     let url = "";
 
-    // Extraer datos reales de Google Search Grounding
     if (metadata?.groundingChunks) {
       for (const chunk of metadata.groundingChunks) {
         const uri = chunk.web?.uri || chunk.googleSearchRetrieval?.source?.url;
@@ -168,7 +175,7 @@ export const parseAddress = async (
 
     const finalResult = {
       recipient: title || lines[0] || rawInput,
-      address: lines[1] || lines[0] || rawInput, // Aquí aparecerá "Alcalde Ramón Pastor 2"
+      address: lines[1] || lines[0] || rawInput,
       lat,
       lng,
       sourceUrl: url || `https://www.google.com/maps?q=${lat},${lng}`,
@@ -187,7 +194,7 @@ export const parseAddress = async (
  */
 export const optimizeRoute = async (deliveries: Delivery[], start: string, onRetry?: (msg: string) => void) => {
   return await withRetry(async () => {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
     const prompt = `Ordena estos IDs por proximidad geográfica para la ruta más corta empezando en ${start}: ${JSON.stringify(deliveries.map(d => ({id: d.id, a: d.address})))}. Responde solo JSON: {"order": ["id1", "id2", ...]}`;
     
     const response = await model.generateContent({
