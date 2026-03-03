@@ -1,4 +1,4 @@
-const GEOCODING_API_KEY = AIzaSyCQA8IShMjLDupXkA6_S8YhnU2JMyGs1LU;
+const GEOCODING_API_KEY = 'AIzaSyCQA8IShMjLDupXkA6_S8YhnU2JMyGs1LU';
 
 export async function geocodeAddress(address: string) {
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
