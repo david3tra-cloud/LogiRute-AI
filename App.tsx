@@ -1,12 +1,10 @@
-import { parseAddress } from './groqService';
-import { geocodeAddress } from './geocodingService';
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Loader2, X, Truck, MapPin, Mic, Power } from 'lucide-react';
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
-// 👇 CAMBIO: usar Groq en vez de Gemini
 import { parseAddress } from './groqService';
+import { geocodeAddress } from './geocodingService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -122,19 +120,24 @@ const App: React.FC = () => {
     setParsingMessage('Localizando destino...');
 
     try {
+      // 1) Groq limpia el texto (nombre, dirección, teléfono)
       const parsed = await parseAddress(
         unifiedInput,
         currentUserLoc,
         newCoordsInput.trim()
       );
 
+      // 2) Google Geocoding: dirección -> coordenadas reales
+      const geo = await geocodeAddress(parsed.address);
+
+      // 3) Creamos la entrega con coords de Google
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
         recipient: parsed.recipient,
         address: parsed.address,
         phone: newPhoneInput.trim() || parsed.phone || '',
-        coordinates: [parsed.lat, parsed.lng],
+        coordinates: [geo.lat, geo.lng],
         status: DeliveryStatus.PENDING,
         type: newType,
         sourceUrl: parsed.sourceUrl,
@@ -156,7 +159,6 @@ const App: React.FC = () => {
     }
   };
 
-  // 👇 borrar COMPLETAMENTE una parada (lista, secuencia y selección)
   const handleDeleteDelivery = (id: string) => {
     setDeliveries((prev) => prev.filter((d) => d.id !== id));
     setManualSequence((prev) => prev.filter((x) => x !== id));
@@ -226,10 +228,7 @@ const App: React.FC = () => {
                 delivery={d}
                 isSelected={selectedId === d.id}
                 onStatusChange={() => {}}
-                // 👇 aquí borras toda la parada
                 onDelete={() => handleDeleteDelivery(d.id)}
-                // si más adelante quieres solo quitar de la secuencia,
-                // puedes añadir otro handler distinto
                 onRemoveFromSequence={() => handleDeleteDelivery(d.id)}
                 onDragStart={() => {}}
                 onDragOver={() => {}}
