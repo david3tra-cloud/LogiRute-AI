@@ -154,6 +154,13 @@ const App: React.FC = () => {
     }
   };
 
+  // 👇 borrar COMPLETAMENTE una parada (lista, secuencia y selección)
+  const handleDeleteDelivery = (id: string) => {
+    setDeliveries((prev) => prev.filter((d) => d.id !== id));
+    setManualSequence((prev) => prev.filter((x) => x !== id));
+    if (selectedId === id) setSelectedId(null);
+  };
+
   if (isAppClosed) {
     return (
       <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
@@ -217,8 +224,11 @@ const App: React.FC = () => {
                 delivery={d}
                 isSelected={selectedId === d.id}
                 onStatusChange={() => {}}
-                onDelete={() => {}}
-                onRemoveFromSequence={() => {}}
+                // 👇 aquí borras toda la parada
+                onDelete={() => handleDeleteDelivery(d.id)}
+                // si más adelante quieres solo quitar de la secuencia,
+                // puedes añadir otro handler distinto
+                onRemoveFromSequence={() => handleDeleteDelivery(d.id)}
                 onDragStart={() => {}}
                 onDragOver={() => {}}
                 onDragEnd={() => {}}
