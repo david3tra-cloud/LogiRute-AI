@@ -23,7 +23,7 @@ async function callGroq(systemPrompt: string, userPrompt: string) {
       Authorization: `Bearer ${GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'llama-3.1-70b-versatile',
+      model: 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -51,8 +51,7 @@ export async function parseAddress(
   manualCoords?: string
 ): Promise<ParsedAddress> {
   const systemPrompt = `
-Eres un asistente para un repartidor. A partir de un texto en español,
-extraes:
+Eres un asistente para un repartidor. A partir de un texto en español, extraes:
 - recipient
 - address
 - phone
