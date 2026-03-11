@@ -1,0 +1,43 @@
+# Cloud Build configuration para LogiRoute AI
+steps:
+  # Paso 1: Construir la imagen Docker
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      '-t',
+      'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/logiroute-ai:latest',
+      '-f',
+      'Dockerfile',
+      '.'
+    ]
+
+  # Paso 2: Empujar la imagen a Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'push',
+      'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/logiroute-ai:latest'
+    ]
+
+  # Paso 3: Desplegar a Cloud Run
+  - name: 'gcr.io/cloud-builders/gke-deploy'
+    args:
+      - run
+      - --filename=.
+      - --image=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/logiroute-ai:latest
+      - --location=europe-west1
+      - --output=/var/run/k8s-export
+  
+  - name: 'gcr.io/cloud-builders/run'
+    args:
+      - deploy
+      - logiroute-ai
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/logiroute-ai:latest'
+      - '--region=europe-west1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+
+images:
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/logiroute-ai:latest'
+
+options:
+  machineType: 'N1_HIGHCPU_8'
