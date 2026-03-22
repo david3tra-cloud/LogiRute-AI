@@ -6,8 +6,8 @@ interface ParsedAddress {
   recipient: string;
   address: string;
   phone?: string;
-  lat: number;
-  lng: number;
+  lat?: number | null;
+  lng?: number | null;
   sourceUrl?: string;
 }
 
@@ -45,6 +45,31 @@ async function callGroq(systemPrompt: string, userPrompt: string) {
   return content as string;
 }
 
+// intenta extraer coords de una cadena: "38.26,-0.70", "https://...@38.26,-0.70,..." etc.
+function extractCoordsFromString(value: string): { lat?: number; lng?: number } {
+  if (!value) return {};
+
+  // 1) formato simple "lat,lng"
+  const simpleMatch = value.match(
+    /(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/
+  );
+  if (simpleMatch) {
+    const lat = parseFloat(simpleMatch[1]);
+    const lng = parseFloat(simpleMatch[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) return { lat, lng };
+  }
+
+  // 2) URLs de Google Maps con @lat,lng
+  const atMatch = value.match(/@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/);
+  if (atMatch) {
+    const lat = parseFloat(atMatch[1]);
+    const lng = parseFloat(atMatch[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) return { lat, lng };
+  }
+
+  return {};
+}
+
 export async function parseAddress(
   rawText: string,
   currentUserLoc?: { latitude: number; longitude: number },
@@ -52,15 +77,24 @@ export async function parseAddress(
 ): Promise<ParsedAddress> {
   const systemPrompt = `
 Eres un asistente para un repartidor. A partir de un texto en español, extraes:
-- recipient
-- address
-- phone
-- lat
-- lng
-Responde SOLO en JSON: {"recipient":"","address":"","phone":"","lat":0,"lng":0}
+- recipient (nombre de la persona o comercio)
+- address (dirección completa en texto)
+- phone (si aparece)
+- lat (si en el texto hay coordenadas claras)
+- lng (si en el texto hay coordenadas claras)
+- sourceUrl (si en el texto hay un enlace de Google Maps)
+
+Responde SOLO en JSON, sin texto adicional, por ejemplo:
+{"recipient":"Cliente","address":"Calle Mayor 10, Elche","phone":"600000000","lat":38.26,"lng":-0.70,"sourceUrl":"https://maps.google.com/..."}
+Si no estás seguro de lat/lng, pon null en esos campos.
 `.trim();
 
-  const userPrompt = `Texto: "${rawText}"`;
+  const userPromptParts = [`Texto: "${rawText}"`];
+  if (manualCoords && manualCoords.trim()) {
+    userPromptParts.push(`Datos adicionales del usuario (coords/plus code/enlace): "${manualCoords.trim()}"`);
+  }
+
+  const userPrompt = userPromptParts.join('\n');
 
   const content = await callGroq(systemPrompt, userPrompt);
 
@@ -70,13 +104,26 @@ Responde SOLO en JSON: {"recipient":"","address":"","phone":"","lat":0,"lng":0}
     const jsonString = content.slice(jsonStart, jsonEnd + 1);
     const parsed = JSON.parse(jsonString);
 
+    let lat: number | null | undefined = parsed.lat;
+    let lng: number | null | undefined = parsed.lng;
+
+    // Si Groq no ha devuelto coords, intentamos sacarlas del campo manualCoords
+    if ((lat == null || lng == null) && manualCoords) {
+      const fromManual = extractCoordsFromString(manualCoords);
+      if (fromManual.lat != null && fromManual.lng != null) {
+        lat = fromManual.lat;
+        lng = fromManual.lng;
+      }
+    }
+
+    // No forzamos a currentUserLoc aquí; dejamos que geocoding se encargue si siguen siendo null
     return {
       recipient: parsed.recipient || 'Cliente',
       address: parsed.address || rawText,
       phone: parsed.phone || '',
-      lat: Number(parsed.lat) || (currentUserLoc?.latitude ?? 0),
-      lng: Number(parsed.lng) || (currentUserLoc?.longitude ?? 0),
-      sourceUrl: parsed.sourceUrl,
+      lat: lat != null ? Number(lat) : undefined,
+      lng: lng != null ? Number(lng) : undefined,
+      sourceUrl: parsed.sourceUrl || manualCoords,
     };
   } catch (e) {
     console.error('Error parseando respuesta de Groq:', e, content);

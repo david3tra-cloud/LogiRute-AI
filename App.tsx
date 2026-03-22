@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Loader2, X, Truck, MapPin, Mic, Power } from 'lucide-react';
+import { Plus, Loader2, X, Truck, MapPin, Mic, Power, Phone, Tag } from 'lucide-react';
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
@@ -30,7 +30,7 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [viewMode, setViewMode] = useState<'split' | 'map' | 'list'>(() => {
+  const [viewMode, setViewMode] = useState<'split' | 'map' | 'list' | 'control'>(() => {
     const saved = safeGetItem(VIEW_MODE_KEY);
     return (saved as any) || 'split';
   });
@@ -114,33 +114,41 @@ const App: React.FC = () => {
 
   const handleAddDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isParsing || !unifiedInput.trim()) return;
+    if (isParsing) return;
+
+    const search = unifiedInput.trim();
+    const coords = newCoordsInput.trim();
+
+    if (!search && !coords) {
+      alert('Introduce algún dato de búsqueda o coordenadas.');
+      return;
+    }
 
     setIsParsing(true);
     setParsingMessage('Localizando destino...');
 
     try {
-      // 1) Groq limpia el texto (nombre, dirección, teléfono)
-      const parsed = await parseAddress(
-        unifiedInput,
-        currentUserLoc,
-        newCoordsInput.trim()
-      );
+      const parsed = await parseAddress(search, currentUserLoc, coords);
 
-      // 2) Google Geocoding: dirección -> coordenadas reales
-      const geo = await geocodeAddress(parsed.address);
+      let lat = parsed.lat;
+      let lng = parsed.lng;
 
-      // 3) Creamos la entrega con coords de Google
+      if (lat == null || lng == null) {
+        const geo = await geocodeAddress(parsed.address);
+        lat = geo.lat;
+        lng = geo.lng;
+      }
+
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: parsed.recipient,
+        recipient: parsed.recipient || search,
         address: parsed.address,
         phone: newPhoneInput.trim() || parsed.phone || '',
-        coordinates: [geo.lat, geo.lng],
+        coordinates: [lat, lng],
         status: DeliveryStatus.PENDING,
         type: newType,
-        sourceUrl: parsed.sourceUrl,
+        sourceUrl: parsed.sourceUrl || coords || undefined,
         estimatedTime: `~${Math.floor(Math.random() * 3) + 1} h`,
       };
 
@@ -165,6 +173,28 @@ const App: React.FC = () => {
     if (selectedId === id) setSelectedId(null);
   };
 
+  const handleStatusChange = (id: string, status: DeliveryStatus) => {
+    setDeliveries((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, status } : d))
+    );
+    if (status === DeliveryStatus.COMPLETED || status === DeliveryStatus.ISSUE) {
+      setManualSequence((prev) => prev.filter((sid) => sid !== id));
+    }
+  };
+
+  const handleClearAll = () => {
+    if (window.confirm('¿BORRAR Y CERRAR? Se eliminarán todas las paradas.')) {
+      setIsAppClosed(true);
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch {
+        // ignorar
+      }
+      window.location.reload();
+    }
+  };
+
   if (isAppClosed) {
     return (
       <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
@@ -179,6 +209,10 @@ const App: React.FC = () => {
     );
   }
 
+  const pendingCount = deliveries.filter(
+    (d) => d.status === DeliveryStatus.PENDING || d.status === DeliveryStatus.IN_PROGRESS
+  ).length;
+
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
       <header className="bg-white border-b px-4 py-3 flex items-center justify-between z-30 shadow-sm">
@@ -189,54 +223,153 @@ const App: React.FC = () => {
           </h1>
         </div>
         <div className="flex bg-slate-100 rounded-xl p-1">
-          {['split', 'map', 'list'].map((mode) => (
+          {['list', 'map', 'split', 'control'].map((mode) => (
             <button
               key={mode}
               onClick={() => setViewMode(mode as any)}
-              className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${
+              className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase ${
                 viewMode === mode ? 'bg-white shadow text-blue-600' : 'text-slate-400'
               }`}
             >
-              {mode}
+              {mode.toUpperCase()}
             </button>
           ))}
         </div>
       </header>
 
       <main className="flex-1 flex overflow-hidden">
-        {viewMode !== 'list' && (
-          <section className="flex-1 relative">
-            <MapView
-              deliveries={deliveries}
-              manualSequence={manualSequence}
-              selectedId={selectedId}
-              onMarkerClick={(id) => setSelectedId(id)}
-              viewMode={viewMode}
-            />
-          </section>
-        )}
+        {viewMode === 'control' ? (
+          <div className="flex-1 p-6 md:p-12 overflow-y-auto bg-slate-50">
+            <div className="max-w-5xl mx-auto space-y-10">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+                <div className="flex flex-col">
+                  <h2 className="text-4xl font-black text-slate-800 tracking-tighter uppercase">
+                    Panel de Control
+                  </h2>
+                  <div className="flex items-center gap-2 mt-1">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                      Versión Groq 1.0
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-4">
+                  <button
+                    onClick={handleClearAll}
+                    className="bg-red-600 text-white px-8 py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
+                  >
+                    <Power size={20} /> Cerrar Sesión
+                  </button>
+                </div>
+              </div>
 
-        {viewMode !== 'map' && (
-          <aside
-            className={`${
-              viewMode === 'split' ? 'w-[440px]' : 'w-full'
-            } border-l bg-white overflow-y-auto p-4 space-y-3`}
-          >
-            {deliveries.map((d, index) => (
-              <DeliveryCard
-                key={d.id}
-                delivery={d}
-                isSelected={selectedId === d.id}
-                onStatusChange={() => {}}
-                onDelete={() => handleDeleteDelivery(d.id)}
-                onRemoveFromSequence={() => handleDeleteDelivery(d.id)}
-                onDragStart={() => {}}
-                onDragOver={() => {}}
-                onDragEnd={() => {}}
-                index={index}
-              />
-            ))}
-          </aside>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-8">
+                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Completadas
+                  </span>
+                  <span className="text-5xl font-black text-slate-800 mt-1">
+                    {
+                      deliveries.filter(
+                        (d) => d.status === DeliveryStatus.COMPLETED
+                      ).length
+                    }
+                  </span>
+                  <div className="flex gap-6 mt-4 mb-2">
+                    <div className="flex flex-col items-center">
+                      <span className="text-xl font-black text-blue-600">
+                        {
+                          deliveries.filter(
+                            (d) =>
+                              d.status === DeliveryStatus.COMPLETED &&
+                              d.type === DeliveryType.DELIVERY
+                          ).length
+                        }
+                      </span>
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">
+                        Entregas
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-center">
+                      <span className="text-xl font-black text-red-600">
+                        {
+                          deliveries.filter(
+                            (d) =>
+                              d.status === DeliveryStatus.COMPLETED &&
+                              d.type === DeliveryType.PICKUP
+                          ).length
+                        }
+                      </span>
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">
+                        Recogidas
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Incidencias
+                  </span>
+                  <span className="text-5xl font-black text-amber-500 mt-2">
+                    {
+                      deliveries.filter(
+                        (d) => d.status === DeliveryStatus.ISSUE
+                      ).length
+                    }
+                  </span>
+                </div>
+
+                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Pendientes
+                  </span>
+                  <span className="text-5xl font-black text-blue-500 mt-2">
+                    {pendingCount}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {viewMode !== 'list' && (
+              <section className="flex-1 relative">
+                <MapView
+                  deliveries={deliveries}
+                  manualSequence={manualSequence}
+                  selectedId={selectedId}
+                  onMarkerClick={(id) => setSelectedId(id)}
+                  viewMode={viewMode}
+                />
+              </section>
+            )}
+
+            {viewMode !== 'map' && (
+              <aside
+                className={`${
+                  viewMode === 'split' ? 'w-[440px]' : 'w-full'
+                } border-l bg-white overflow-y-auto p-4 space-y-3`}
+              >
+                {deliveries.map((d, index) => (
+                  <DeliveryCard
+                    key={d.id}
+                    delivery={d}
+                    index={index}
+                    isSelected={selectedId === d.id}
+                    onClick={() => setSelectedId(d.id)}
+                    onStatusChange={(id, status) => handleStatusChange(id, status)}
+                    onDelete={(id) => handleDeleteDelivery(id)}
+                    onRemoveFromSequence={(id) =>
+                      setManualSequence((prev) => prev.filter((x) => x !== id))
+                    }
+                    onDragStart={() => {}}
+                    onDragOver={() => {}}
+                    onDragEnd={() => {}}
+                  />
+                ))}
+              </aside>
+            )}
+          </>
         )}
       </main>
 
@@ -269,7 +402,7 @@ const App: React.FC = () => {
                   onClick={() => setNewType(DeliveryType.DELIVERY)}
                   className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
                     newType === DeliveryType.DELIVERY
-                      ? 'bg-blue-600 text-white shadow-lg'
+                      ? 'bg-blue-600 text:white shadow-lg'
                       : 'text-slate-400'
                   }`}
                 >
@@ -290,66 +423,105 @@ const App: React.FC = () => {
 
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                  ¿A DÓNDE VAMOS? (NOMBRE Y/O DIRECCIÓN)
+                  Nombre, Comercio o Dirección
                 </label>
                 <div className="relative">
                   <MapPin
-                    className="absolute left-4 top-5 text-slate-300"
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
                     size={20}
                   />
                   <textarea
                     value={unifiedInput}
                     onChange={(e) => setUnifiedInput(e.target.value)}
-                    className="w-full h-32 pl-12 pr-14 py-5 border-2 border-slate-100 rounded-[30px] outline-none focus:border-blue-500 font-bold text-lg resize-none"
-                    placeholder="Ej: Zapatillas Paredes Elche o Calle Mayor 10..."
+                    className="w-full h-28 pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                    placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10"
                   />
                   <button
                     type="button"
                     onClick={toggleListening}
-                    className={`absolute right-4 bottom-4 p-4 rounded-2xl ${
+                    className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
                       isListening
                         ? 'bg-red-500 text-white animate-pulse'
                         : 'bg-slate-100 text-slate-400'
                     }`}
                   >
-                    <Mic size={20} />
+                    <Mic size={18} />
                   </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                    CONCEPTO
+                    Teléfono
                   </label>
+                  <div className="relative">
+                    <Phone
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                      size={16}
+                    />
+                    <input
+                      type="tel"
+                      value={newPhoneInput}
+                      onChange={(e) => setNewPhoneInput(e.target.value)}
+                      className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                    Coordenadas / Plus Code / Enlace
+                  </label>
+                  <div className="relative">
+                    <MapPin
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                      size={16}
+                    />
+                    <input
+                      type="text"
+                      value={newCoordsInput}
+                      onChange={(e) => setNewCoordsInput(e.target.value)}
+                      className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
+                      placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche o enlace maps"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                  Concepto (Ej: Paquete 4)
+                </label>
+                <div className="relative">
+                  <Tag
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                    size={20}
+                  />
                   <input
                     type="text"
                     value={conceptInput}
                     onChange={(e) => setConceptInput(e.target.value)}
-                    className="w-full px-5 py-4 border-2 border-slate-100 rounded-2xl font-bold"
-                    placeholder="Ej: Paquete 4"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                    TELÉFONO
-                  </label>
-                  <input
-                    type="tel"
-                    value={newPhoneInput}
-                    onChange={(e) => setNewPhoneInput(e.target.value)}
-                    className="w-full px-5 py-4 border-2 border-slate-100 rounded-2xl font-bold"
+                    className="w-full pl-12 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold"
                   />
                 </div>
               </div>
 
               <button
                 type="submit"
-                disabled={isParsing || !unifiedInput.trim()}
-                className="w-full py-6 bg-blue-600 text-white rounded-[30px] font-black text-xl shadow-xl flex items-center justify-center gap-4 uppercase"
+                disabled={isParsing || (!unifiedInput.trim() && !newCoordsInput.trim())}
+                className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4"
               >
-                {isParsing ? <Loader2 className="animate-spin" /> : <Plus size={24} />}
-                {isParsing ? parsingMessage : 'Añadir Parada'}
+                {isParsing ? (
+                  <div className="flex flex-col items-center">
+                    <Loader2 className="animate-spin" size={24} />
+                    <span className="text-[10px] mt-1 font-bold">
+                      {parsingMessage}
+                    </span>
+                  </div>
+                ) : (
+                  <Plus size={24} />
+                )}
+                Añadir Parada
               </button>
             </form>
           </div>
