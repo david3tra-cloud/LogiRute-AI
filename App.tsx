@@ -5,6 +5,7 @@ import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
 import { parseAddress } from './groqService';
 import { geocodeAddress } from './geocodingService';
+import { optimizeDeliveries } from './routeService';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -195,6 +196,21 @@ const App: React.FC = () => {
     }
   };
 
+  const handleOptimizeRoute = () => {
+    if (!currentUserLoc) {
+      alert('Activa primero tu ubicación (GPS del dispositivo).');
+      return;
+    }
+
+    const startPoint = {
+      lat: currentUserLoc.latitude,
+      lng: currentUserLoc.longitude,
+    };
+
+    const optimized = optimizeDeliveries(deliveries, startPoint);
+    setDeliveries(optimized);
+  };
+
   if (isAppClosed) {
     return (
       <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
@@ -210,7 +226,9 @@ const App: React.FC = () => {
   }
 
   const pendingCount = deliveries.filter(
-    (d) => d.status === DeliveryStatus.PENDING || d.status === DeliveryStatus.IN_PROGRESS
+    (d) =>
+      d.status === DeliveryStatus.PENDING ||
+      d.status === DeliveryStatus.IN_PROGRESS
   ).length;
 
   return (
@@ -222,18 +240,29 @@ const App: React.FC = () => {
             LOGIROUTE <span className="text-blue-600">AI</span>
           </h1>
         </div>
-        <div className="flex bg-slate-100 rounded-xl p-1">
-          {['list', 'map', 'split', 'control'].map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setViewMode(mode as any)}
-              className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase ${
-                viewMode === mode ? 'bg-white shadow text-blue-600' : 'text-slate-400'
-              }`}
-            >
-              {mode.toUpperCase()}
-            </button>
-          ))}
+
+        <div className="flex items-center gap-3">
+          <div className="flex bg-slate-100 rounded-xl p-1">
+            {['list', 'map', 'split', 'control'].map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode as any)}
+                className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase ${
+                  viewMode === mode ? 'bg-white shadow text-blue-600' : 'text-slate-400'
+                }`}
+              >
+                {mode.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={handleOptimizeRoute}
+            disabled={!currentUserLoc || deliveries.length === 0}
+            className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
+          >
+            OPTIMIZAR
+          </button>
         </div>
       </header>
 
