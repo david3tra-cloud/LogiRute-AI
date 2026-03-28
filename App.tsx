@@ -70,7 +70,6 @@ const App: React.FC = () => {
 
   const recognitionRef = useRef<any>(null);
 
-  // sensores dnd-kit
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -265,7 +264,6 @@ const App: React.FC = () => {
       d.status === DeliveryStatus.IN_PROGRESS
   ).length;
 
-  // ordenar lista según manualSequence
   const sortedDeliveries: Delivery[] = React.useMemo(() => {
     const byId: Record<string, Delivery> = {};
     deliveries.forEach((d) => {
@@ -301,21 +299,22 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
-      <header className="bg-white border-b px-4 py-3 flex items-center justify-between z-30 shadow-sm">
-        <div className="flex items-center gap-2">
-          <Truck className="text-blue-600" size={24} />
-          <h1 className="text-xl font-black tracking-tighter">
+      {/* HEADER */}
+      <header className="bg-white border-b px-3 py-2 flex items-center justify-between gap-2 z-30 shadow-sm">
+        <div className="flex items-center gap-2 min-w-0">
+          <Truck className="text-blue-600 shrink-0" size={22} />
+          <h1 className="text-lg font-black tracking-tighter truncate">
             LOGIROUTE <span className="text-blue-600">AI</span>
           </h1>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex bg-slate-100 rounded-xl p-1">
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex bg-slate-100 rounded-xl p-1 text-[9px] sm:text-[10px]">
             {['list', 'map', 'split', 'control'].map((mode) => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode as any)}
-                className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase ${
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg font-black uppercase ${
                   viewMode === mode ? 'bg-white shadow text-blue-600' : 'text-slate-400'
                 }`}
               >
@@ -324,30 +323,49 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          <button
-            onClick={handleOptimizeRoute}
-            disabled={!currentUserLoc || deliveries.length === 0}
-            className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
-          >
-            OPTIMIZAR
-          </button>
-
-          <button
-            type="button"
-            className="bg-black text-yellow-300 px-4 py-2 rounded-xl text-[10px] font-black uppercase"
-          >
-            PRO
-          </button>
+          <div className="hidden sm:flex items-center gap-2">
+            <button
+              onClick={handleOptimizeRoute}
+              disabled={!currentUserLoc || deliveries.length === 0}
+              className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase disabled:opacity-40"
+            >
+              OPTIMIZAR
+            </button>
+            <button
+              type="button"
+              className="bg-black text-yellow-300 px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase"
+            >
+              PRO
+            </button>
+          </div>
         </div>
       </header>
 
-      <main className="flex-1 flex overflow-hidden">
+      {/* barra acciones móvil */}
+      <div className="sm:hidden bg-white border-b px-3 py-2 flex items-center justify-end gap-2">
+        <button
+          onClick={handleOptimizeRoute}
+          disabled={!currentUserLoc || deliveries.length === 0}
+          className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
+        >
+          OPTIMIZAR
+        </button>
+        <button
+          type="button"
+          className="bg-black text-yellow-300 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase"
+        >
+          PRO
+        </button>
+      </div>
+
+      {/* MAIN */}
+      <main className="flex-1 flex flex-col sm:flex-row overflow-hidden">
         {viewMode === 'control' ? (
-          <div className="flex-1 p-6 md:p-12 overflow-y-auto bg-slate-50">
+          <div className="flex-1 p-4 sm:p-6 md:p-12 overflow-y-auto bg-slate-50">
             <div className="max-w-5xl mx-auto space-y-10">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
                 <div className="flex flex-col">
-                  <h2 className="text-4xl font-black text-slate-800 tracking-tighter uppercase">
+                  <h2 className="text-3xl sm:text-4xl font-black text-slate-800 tracking-tighter uppercase">
                     Panel de Control
                   </h2>
                   <div className="flex items-center gap-2 mt-1">
@@ -359,19 +377,19 @@ const App: React.FC = () => {
                 <div className="flex gap-4">
                   <button
                     onClick={handleClearAll}
-                    className="bg-red-600 text-white px-8 py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
+                    className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
                   >
                     <Power size={20} /> Cerrar Sesión
                   </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-8">
-                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 sm:gap-8">
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
                   <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                     Completadas
                   </span>
-                  <span className="text-5xl font-black text-slate-800 mt-1">
+                  <span className="text-4xl sm:text-5xl font-black text-slate-800 mt-1">
                     {
                       deliveries.filter(
                         (d) => d.status === DeliveryStatus.COMPLETED
@@ -380,7 +398,7 @@ const App: React.FC = () => {
                   </span>
                   <div className="flex gap-6 mt-4 mb-2">
                     <div className="flex flex-col items-center">
-                      <span className="text-xl font-black text-blue-600">
+                      <span className="text-lg sm:text-xl font-black text-blue-600">
                         {
                           deliveries.filter(
                             (d) =>
@@ -394,7 +412,7 @@ const App: React.FC = () => {
                       </p>
                     </div>
                     <div className="flex flex-col items-center">
-                      <span className="text-xl font-black text-red-600">
+                      <span className="text-lg sm:text-xl font-black text-red-600">
                         {
                           deliveries.filter(
                             (d) =>
@@ -410,11 +428,11 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
                   <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                     Incidencias
                   </span>
-                  <span className="text-5xl font-black text-amber-500 mt-2">
+                  <span className="text-4xl sm:text-5xl font-black text-amber-500 mt-2">
                     {
                       deliveries.filter(
                         (d) => d.status === DeliveryStatus.ISSUE
@@ -423,11 +441,11 @@ const App: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
                   <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                     Pendientes
                   </span>
-                  <span className="text-5xl font-black text-blue-500 mt-2">
+                  <span className="text-4xl sm:text-5xl font-black text-blue-500 mt-2">
                     {pendingCount}
                   </span>
                 </div>
@@ -437,7 +455,13 @@ const App: React.FC = () => {
         ) : (
           <>
             {viewMode !== 'list' && (
-              <section className="flex-1 relative">
+              <section
+                className={
+                  viewMode === 'split'
+                    ? 'h-1/2 sm:h-auto sm:flex-1 relative'
+                    : 'flex-1 relative'
+                }
+              >
                 <MapView
                   deliveries={deliveries}
                   manualSequence={manualSequence}
@@ -449,12 +473,38 @@ const App: React.FC = () => {
               </section>
             )}
 
-            {viewMode !== 'map' && (
-              <aside
-                className={`${
-                  viewMode === 'split' ? 'w-[440px]' : 'w-full'
-                } border-l bg-white overflow-y-auto p-4 space-y-3`}
-              >
+            {viewMode === 'split' && (
+              <aside className="h-1/2 sm:h-auto sm:w-[440px] border-t sm:border-t-0 sm:border-l bg-white overflow-y-auto p-4 space-y-3">
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEndList}
+                >
+                  <SortableContext
+                    items={sortedDeliveries.map((d) => d.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    {sortedDeliveries.map((d, index) => (
+                      <DeliveryCard
+                        key={d.id}
+                        delivery={d}
+                        index={index}
+                        isSelected={selectedId === d.id}
+                        onClick={() => setSelectedId(d.id)}
+                        onStatusChange={(id, status) => handleStatusChange(id, status)}
+                        onDelete={(id) => handleDeleteDelivery(id)}
+                        onRemoveFromSequence={(id) =>
+                          setManualSequence((prev) => prev.filter((x) => x !== id))
+                        }
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
+              </aside>
+            )}
+
+            {viewMode === 'list' && (
+              <aside className="flex-1 bg-white overflow-y-auto p-4 space-y-3">
                 <DndContext
                   sensors={sensors}
                   collisionDetection={closestCenter}
