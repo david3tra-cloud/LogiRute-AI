@@ -368,7 +368,95 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col sm:flex-row overflow-hidden">
         {viewMode === 'control' ? (
           <div className="flex-1 p-4 sm:p-6 md:p-12 overflow-y-auto bg-slate-50">
-            {/* ... panel de control igual que ya tenías ... */}
+            <div className="max-w-5xl mx-auto space-y-10">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+                <div className="flex flex-col">
+                  <h2 className="text-3xl sm:text-4xl font-black text-slate-800 tracking-tighter uppercase">
+                    Panel de Control
+                  </h2>
+                  <div className="flex items-center gap-2 mt-1">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                      Versión Groq 1.0
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-4">
+                  <button
+                    onClick={handleClearAll}
+                    className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
+                  >
+                    <Power size={20} /> Cerrar Sesión
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 sm:gap-8">
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Completadas
+                  </span>
+                  <span className="text-4xl sm:text-5xl font-black text-slate-800 mt-1">
+                    {
+                      deliveries.filter(
+                        (d) => d.status === DeliveryStatus.COMPLETED
+                      ).length
+                    }
+                  </span>
+                  <div className="flex gap-6 mt-4 mb-2">
+                    <div className="flex flex-col items-center">
+                      <span className="text-lg sm:text-xl font-black text-blue-600">
+                        {
+                          deliveries.filter(
+                            (d) =>
+                              d.status === DeliveryStatus.COMPLETED &&
+                              d.type === DeliveryType.DELIVERY
+                          ).length
+                        }
+                      </span>
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">
+                        Entregas
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-center">
+                      <span className="text-lg sm:text-xl font-black text-red-600">
+                        {
+                          deliveries.filter(
+                            (d) =>
+                              d.status === DeliveryStatus.COMPLETED &&
+                              d.type === DeliveryType.PICKUP
+                          ).length
+                        }
+                      </span>
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">
+                        Recogidas
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Incidencias
+                  </span>
+                  <span className="text-4xl sm:text-5xl font-black text-amber-500 mt-2">
+                    {
+                      deliveries.filter(
+                        (d) => d.status === DeliveryStatus.ISSUE
+                      ).length
+                    }
+                  </span>
+                </div>
+
+                <div className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-xl flex flex-col items-center">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Pendientes
+                  </span>
+                  <span className="text-4xl sm:text-5xl font-black text-blue-500 mt-2">
+                    {pendingCount}
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
         ) : (
           <>
@@ -464,7 +552,147 @@ const App: React.FC = () => {
       {isAdding && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
           <div className="bg-white rounded-[40px] w-full max-w-xl shadow-2xl overflow-hidden">
-            {/* ... resto del modal Nueva Parada exactamente como ya lo tenías ... */}
+            <div className="p-8 border-b flex justify-between items-center bg-slate-50/40">
+              <h3 className="text-2xl font-black uppercase tracking-tighter italic">
+                Nueva Parada
+              </h3>
+              <button
+                onClick={() => setIsAdding(false)}
+                className="p-2 hover:bg-slate-200 rounded-xl"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddDelivery} className="p-8 space-y-6">
+              <div className="flex bg-slate-100 p-1.5 rounded-3xl">
+                <button
+                  type="button"
+                  onClick={() => setNewType(DeliveryType.DELIVERY)}
+                  className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
+                    newType === DeliveryType.DELIVERY
+                      ? 'bg-blue-600 text:white shadow-lg'
+                      : 'text-slate-400'
+                  }`}
+                >
+                  ENTREGA
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewType(DeliveryType.PICKUP)}
+                  className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
+                    newType === DeliveryType.PICKUP
+                      ? 'bg-red-600 text-white shadow-lg'
+                      : 'text-slate-400'
+                  }`}
+                >
+                  RECOGIDA
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                  Nombre, Comercio o Dirección
+                </label>
+                <div className="relative">
+                  <MapPin
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                    size={20}
+                  />
+                  <textarea
+                    value={unifiedInput}
+                    onChange={(e) => setUnifiedInput(e.target.value)}
+                    className="w-full h-28 pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                    placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10"
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleListening}
+                    className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
+                      isListening
+                        ? 'bg-red-500 text-white animate-pulse'
+                        : 'bg-slate-100 text-slate-400'
+                    }`}
+                  >
+                    <Mic size={18} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                    Teléfono
+                  </label>
+                  <div className="relative">
+                    <Phone
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                      size={16}
+                    />
+                    <input
+                      type="tel"
+                      value={newPhoneInput}
+                      onChange={(e) => setNewPhoneInput(e.target.value)}
+                      className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                    Coordenadas / Plus Code / Enlace
+                  </label>
+                  <div className="relative">
+                    <MapPin
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                      size={16}
+                    />
+                    <input
+                      type="text"
+                      value={newCoordsInput}
+                      onChange={(e) => setNewCoordsInput(e.target.value)}
+                      className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
+                      placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche o enlace maps"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                  Concepto (Ej: Paquete 4)
+                </label>
+                <div className="relative">
+                  <Tag
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                    size={20}
+                  />
+                  <input
+                    type="text"
+                    value={conceptInput}
+                    onChange={(e) => setConceptInput(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isParsing || (!unifiedInput.trim() && !newCoordsInput.trim())}
+                className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4"
+              >
+                {isParsing ? (
+                  <div className="flex flex-col items-center">
+                    <Loader2 className="animate-spin" size={24} />
+                    <span className="text-[10px] mt-1 font-bold">
+                      {parsingMessage}
+                    </span>
+                  </div>
+                ) : (
+                  <Plus size={24} />
+                )}
+                Añadir Parada
+              </button>
+            </form>
           </div>
         </div>
       )}
