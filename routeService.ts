@@ -13,19 +13,38 @@ export function optimizeDeliveries(
   deliveries: Delivery[],
   start: Point
 ): Delivery[] {
+  // 1) Separar por estado
   const active = deliveries.filter(
     (d) =>
-      d.status === DeliveryStatus.PENDING ||
-      d.status === DeliveryStatus.IN_PROGRESS
+      (d.status === DeliveryStatus.PENDING ||
+        d.status === DeliveryStatus.IN_PROGRESS)
   );
+
   const completed = deliveries.filter(
     (d) =>
       d.status === DeliveryStatus.COMPLETED ||
       d.status === DeliveryStatus.ISSUE
   );
 
-  const remaining = [...active];
-  const result: Delivery[] = [];
+  // 2) De las activas, separar las que tienen coordenadas válidas
+  const withCoords: Delivery[] = [];
+  const withoutCoords: Delivery[] = [];
+
+  for (const d of active) {
+    if (
+      Array.isArray(d.coordinates) &&
+      typeof d.coordinates[0] === "number" &&
+      typeof d.coordinates[1] === "number"
+    ) {
+      withCoords.push(d);
+    } else {
+      withoutCoords.push(d);
+    }
+  }
+
+  // 3) Nearest Neighbor solo para las que tienen coords
+  const remaining = [...withCoords];
+  const optimized: Delivery[] = [];
   let current = start;
   let seq = 1;
 
@@ -44,10 +63,17 @@ export function optimizeDeliveries(
     }
 
     const next = remaining.splice(bestIndex, 1)[0];
-    result.push({ ...next, sequence: seq });
+    optimized.push({ ...next, sequence: seq });
     current = { lat: next.coordinates[0], lng: next.coordinates[1] };
     seq++;
   }
 
-  return [...result, ...completed];
+  // 4) A las que no tienen coords les asignamos secuencia detrás, manteniendo su orden original
+  const withoutCoordsWithSeq = withoutCoords.map((d) => ({
+    ...d,
+    sequence: seq++,
+  }));
+
+  // 5) Las completadas e incidencias se devuelven al final tal cual
+  return [...optimized, ...withoutCoordsWithSeq, ...completed];
 }
