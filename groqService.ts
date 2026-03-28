@@ -1,6 +1,6 @@
 // groqService.ts
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 interface ParsedAddress {
   recipient: string;
@@ -13,20 +13,20 @@ interface ParsedAddress {
 
 async function callGroq(systemPrompt: string, userPrompt: string) {
   if (!GROQ_API_KEY) {
-    throw new Error('VITE_GROQ_API_KEY no está definida');
+    throw new Error("VITE_GROQ_API_KEY no está definida");
   }
 
   const res = await fetch(GROQ_API_URL, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       Authorization: `Bearer ${GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model: "llama-3.3-70b-versatile",
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
       temperature: 0.3,
     }),
@@ -40,7 +40,7 @@ async function callGroq(systemPrompt: string, userPrompt: string) {
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    throw new Error('Groq devolvió una respuesta vacía');
+    throw new Error("Groq devolvió una respuesta vacía");
   }
   return content as string;
 }
@@ -75,32 +75,67 @@ export async function parseAddress(
   currentUserLoc?: { latitude: number; longitude: number },
   manualCoords?: string
 ): Promise<ParsedAddress> {
-  const systemPrompt = `
-Eres un asistente para un repartidor. A partir de un texto en español, extraes:
-- recipient (nombre de la persona o comercio)
-- address (dirección completa en texto)
-- phone (si aparece)
-- lat (si en el texto hay coordenadas claras)
-- lng (si en el texto hay coordenadas claras)
-- sourceUrl (si en el texto hay un enlace de Google Maps)
+  // contexto local por defecto
+  const baseLocation = "Elche, Alicante, España";
 
-Responde SOLO en JSON, sin texto adicional, por ejemplo:
-{"recipient":"Cliente","address":"Calle Mayor 10, Elche","phone":"600000000","lat":38.26,"lng":-0.70,"sourceUrl":"https://maps.google.com/..."}
-Si no estás seguro de lat/lng, pon null en esos campos.
+  const hasNumber = /[0-9]/.test(rawText);
+  const wordCount = rawText.trim().split(/\s+/).length;
+
+  // Si es un nombre corto sin números, asumimos negocio local y añadimos ciudad/país
+  const enrichedText =
+    !hasNumber && wordCount <= 5
+      ? `${rawText}, ${baseLocation}`
+      : rawText;
+
+  const systemPrompt = `
+Eres un asistente de reparto que funciona como Google Maps.
+
+A partir de un texto en español, debes devolver SIEMPRE un solo resultado de entrega con estos campos:
+
+- "recipient": nombre de la persona o comercio (por ejemplo "El Corte Inglés", "Zara Elche")
+- "address": dirección postal completa (calle, número si existe, código postal, ciudad y provincia)
+- "phone": teléfono si aparece en el texto, si no deja cadena vacía ""
+- "lat": latitud en número decimal (si no estás seguro, pon null)
+- "lng": longitud en número decimal (si no estás seguro, pon null)
+- "sourceUrl": enlace de Google Maps si lo conoces o si lo infieres
+
+REGLAS IMPORTANTES:
+- Si el usuario solo da el nombre de un negocio sin ciudad, asume que está en ${baseLocation}.
+- Usa la sucursal en ${baseLocation} cuando haya varias opciones.
+- Intenta que la dirección sea localizable en Google Maps.
+- Responde SIEMPRE con UN JSON VÁLIDO, SIN TEXTO EXTRA, sin comentarios ni explicaciones.
+
+Ejemplo de formato de respuesta:
+
+{"recipient":"Zara Elche","address":"Centro Comercial L'Aljub, Autovía A-7, km 73, 03205 Elche, Alicante","phone":"","lat":38.2705,"lng":-0.6882,"sourceUrl":"https://maps.google.com/..."}
+
+Si no conoces lat/lng exactos, pon "lat": null y "lng": null.
 `.trim();
 
-  const userPromptParts = [`Texto: "${rawText}"`];
+  const userPromptParts = [
+    `Texto original del usuario: "${rawText}"`,
+    `Texto enriquecido para buscar negocio/dirección: "${enrichedText}"`,
+  ];
+
   if (manualCoords && manualCoords.trim()) {
-    userPromptParts.push(`Datos adicionales del usuario (coords/plus code/enlace): "${manualCoords.trim()}"`);
+    userPromptParts.push(
+      `Datos adicionales del usuario (coords/plus code/enlace): "${manualCoords.trim()}"`
+    );
   }
 
-  const userPrompt = userPromptParts.join('\n');
+  if (currentUserLoc) {
+    userPromptParts.push(
+      `Ubicación aproximada del repartidor (puede ayudarte a elegir la sucursal correcta): lat=${currentUserLoc.latitude}, lng=${currentUserLoc.longitude}`
+    );
+  }
+
+  const userPrompt = userPromptParts.join("\n");
 
   const content = await callGroq(systemPrompt, userPrompt);
 
   try {
-    const jsonStart = content.indexOf('{');
-    const jsonEnd = content.lastIndexOf('}');
+    const jsonStart = content.indexOf("{");
+    const jsonEnd = content.lastIndexOf("}");
     const jsonString = content.slice(jsonStart, jsonEnd + 1);
     const parsed = JSON.parse(jsonString);
 
@@ -116,17 +151,16 @@ Si no estás seguro de lat/lng, pon null en esos campos.
       }
     }
 
-    // No forzamos a currentUserLoc aquí; dejamos que geocoding se encargue si siguen siendo null
     return {
-      recipient: parsed.recipient || 'Cliente',
-      address: parsed.address || rawText,
-      phone: parsed.phone || '',
+      recipient: parsed.recipient || "Cliente",
+      address: parsed.address || enrichedText || rawText,
+      phone: parsed.phone || "",
       lat: lat != null ? Number(lat) : undefined,
       lng: lng != null ? Number(lng) : undefined,
       sourceUrl: parsed.sourceUrl || manualCoords,
     };
   } catch (e) {
-    console.error('Error parseando respuesta de Groq:', e, content);
-    throw new Error('No se pudo interpretar la dirección con IA.');
+    console.error("Error parseando respuesta de Groq:", e, content);
+    throw new Error("No se pudo interpretar la dirección con IA.");
   }
 }

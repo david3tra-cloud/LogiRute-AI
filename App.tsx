@@ -6,6 +6,21 @@ import { Delivery, DeliveryStatus, DeliveryType } from './types';
 import { parseAddress } from './groqService';
 import { geocodeAddress } from './geocodingService';
 import { optimizeDeliveries } from './routeService';
+import {
+  DndContext,
+  closestCenter,
+  DragEndEvent,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  verticalListSortingStrategy,
+  sortableKeyboardCoordinates,
+} from '@dnd-kit/sortable';
 
 const STORAGE_KEY = 'logiroute_deliveries_v3';
 const VIEW_MODE_KEY = 'logiroute_viewmode_v1';
@@ -54,6 +69,14 @@ const App: React.FC = () => {
   >(undefined);
 
   const recognitionRef = useRef<any>(null);
+
+  // sensores dnd-kit
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   useEffect(() => {
     if (isAppClosed) return;
@@ -131,19 +154,14 @@ const App: React.FC = () => {
     try {
       const parsed = await parseAddress(search, currentUserLoc, coords);
 
-      let lat = parsed.lat;
-      let lng = parsed.lng;
-
-      if (lat == null || lng == null) {
-        const geo = await geocodeAddress(parsed.address);
-        lat = geo.lat;
-        lng = geo.lng;
-      }
+      const geo = await geocodeAddress(parsed.address);
+      const lat = geo.lat;
+      const lng = geo.lng;
 
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: parsed.recipient || search,
+        recipient: search,
         address: parsed.address,
         phone: newPhoneInput.trim() || parsed.phone || '',
         coordinates: [lat, lng],
@@ -211,6 +229,22 @@ const App: React.FC = () => {
     setDeliveries(optimized);
   };
 
+  const handleMarkerDragEnd = (id: string, coords: [number, number]) => {
+    setDeliveries((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, coordinates: coords } : d))
+    );
+  };
+
+  const handleMarkerSelectForSequence = (id: string) => {
+    setManualSequence((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((x) => x !== id);
+      }
+      return [...prev, id];
+    });
+    setSelectedId((prev) => (prev === id ? null : id));
+  };
+
   if (isAppClosed) {
     return (
       <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
@@ -230,6 +264,40 @@ const App: React.FC = () => {
       d.status === DeliveryStatus.PENDING ||
       d.status === DeliveryStatus.IN_PROGRESS
   ).length;
+
+  // ordenar lista según manualSequence
+  const sortedDeliveries: Delivery[] = React.useMemo(() => {
+    const byId: Record<string, Delivery> = {};
+    deliveries.forEach((d) => {
+      byId[d.id] = d;
+    });
+
+    const inSequence: Delivery[] = [];
+    manualSequence.forEach((id) => {
+      if (byId[id]) {
+        inSequence.push(byId[id]);
+        delete byId[id];
+      }
+    });
+
+    const remaining = Object.values(byId);
+
+    return [...inSequence, ...remaining];
+  }, [deliveries, manualSequence]);
+
+  const handleDragEndList = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!active || !over || active.id === over.id) return;
+
+    const activeIndex = sortedDeliveries.findIndex((d) => d.id === active.id);
+    const overIndex = sortedDeliveries.findIndex((d) => d.id === over.id);
+    if (activeIndex === -1 || overIndex === -1) return;
+
+    const newOrder = arrayMove(sortedDeliveries, activeIndex, overIndex);
+    const newSequence = newOrder.map((d) => d.id);
+
+    setManualSequence(newSequence);
+  };
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
@@ -262,6 +330,13 @@ const App: React.FC = () => {
             className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
           >
             OPTIMIZAR
+          </button>
+
+          <button
+            type="button"
+            className="bg-black text-yellow-300 px-4 py-2 rounded-xl text-[10px] font-black uppercase"
+          >
+            PRO
           </button>
         </div>
       </header>
@@ -367,8 +442,9 @@ const App: React.FC = () => {
                   deliveries={deliveries}
                   manualSequence={manualSequence}
                   selectedId={selectedId}
-                  onMarkerClick={(id) => setSelectedId(id)}
+                  onMarkerClick={handleMarkerSelectForSequence}
                   viewMode={viewMode}
+                  onMarkerDragEnd={handleMarkerDragEnd}
                 />
               </section>
             )}
@@ -379,23 +455,31 @@ const App: React.FC = () => {
                   viewMode === 'split' ? 'w-[440px]' : 'w-full'
                 } border-l bg-white overflow-y-auto p-4 space-y-3`}
               >
-                {deliveries.map((d, index) => (
-                  <DeliveryCard
-                    key={d.id}
-                    delivery={d}
-                    index={index}
-                    isSelected={selectedId === d.id}
-                    onClick={() => setSelectedId(d.id)}
-                    onStatusChange={(id, status) => handleStatusChange(id, status)}
-                    onDelete={(id) => handleDeleteDelivery(id)}
-                    onRemoveFromSequence={(id) =>
-                      setManualSequence((prev) => prev.filter((x) => x !== id))
-                    }
-                    onDragStart={() => {}}
-                    onDragOver={() => {}}
-                    onDragEnd={() => {}}
-                  />
-                ))}
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEndList}
+                >
+                  <SortableContext
+                    items={sortedDeliveries.map((d) => d.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    {sortedDeliveries.map((d, index) => (
+                      <DeliveryCard
+                        key={d.id}
+                        delivery={d}
+                        index={index}
+                        isSelected={selectedId === d.id}
+                        onClick={() => setSelectedId(d.id)}
+                        onStatusChange={(id, status) => handleStatusChange(id, status)}
+                        onDelete={(id) => handleDeleteDelivery(id)}
+                        onRemoveFromSequence={(id) =>
+                          setManualSequence((prev) => prev.filter((x) => x !== id))
+                        }
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
               </aside>
             )}
           </>
