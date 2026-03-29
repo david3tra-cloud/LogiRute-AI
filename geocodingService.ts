@@ -11,6 +11,37 @@ if (!GEOCODING_API_KEY) {
   );
 }
 
+// Intenta extraer coordenadas lat,lng de un string
+function parseLatLng(input: string): { lat: number; lng: number } | null {
+  const trimmed = input.trim();
+
+  // 1) Formato simple "lat,lng"
+  const simpleMatch = trimmed.match(
+    /^(-?\d+(\.\d+)?)\s*,\s*(-?\d+(\.\d+)?)$/
+  );
+  if (simpleMatch) {
+    const lat = parseFloat(simpleMatch[1]);
+    const lng = parseFloat(simpleMatch[3]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      return { lat, lng };
+    }
+  }
+
+  // 2) Coordenadas dentro de una URL (ej: .../@38.2695,-0.6987,17z/...)
+  const urlMatch = trimmed.match(
+    /@(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)/ // @lat,lng
+  );
+  if (urlMatch) {
+    const lat = parseFloat(urlMatch[1]);
+    const lng = parseFloat(urlMatch[3]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      return { lat, lng };
+    }
+  }
+
+  return null;
+}
+
 export async function geocodeAddress(address: string) {
   if (!GEOCODING_API_KEY) {
     throw new Error(
@@ -18,6 +49,15 @@ export async function geocodeAddress(address: string) {
     );
   }
 
+  // 1) Si el usuario ha puesto coordenadas o una URL con coordenadas,
+  // las usamos directamente y evitamos llamar a la API.
+  const directCoords = parseLatLng(address);
+  if (directCoords) {
+    return directCoords;
+  }
+
+  // 2) Si es un enlace de Maps sin coordenadas claras (Plus Code, etc.),
+  // usamos el texto completo como address para Geocoding.
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
     address
   )}&key=${GEOCODING_API_KEY}&region=${DEFAULT_REGION}`;

@@ -159,7 +159,9 @@ const App: React.FC = () => {
     try {
       const parsed = await parseAddress(search, currentUserLoc, coords);
 
-      const geo = await geocodeAddress(parsed.address);
+      const geocodingTarget = coords || parsed.address;
+
+      const geo = await geocodeAddress(geocodingTarget);
       const lat = geo.lat;
       const lng = geo.lng;
 
@@ -198,9 +200,27 @@ const App: React.FC = () => {
   };
 
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
-    setDeliveries((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, status } : d))
-    );
+    // Actualizamos estado y enviamos completadas/incidencias al final
+    setDeliveries((prev) => {
+      const updated = prev.map((d) =>
+        d.id === id ? { ...d, status } : d
+      );
+
+      const active = updated.filter(
+        (d) =>
+          d.status === DeliveryStatus.PENDING ||
+          d.status === DeliveryStatus.IN_PROGRESS
+      );
+      const done = updated.filter(
+        (d) =>
+          d.status === DeliveryStatus.COMPLETED ||
+          d.status === DeliveryStatus.ISSUE
+      );
+
+      return [...active, ...done];
+    });
+
+    // Sacamos de la secuencia manual si se completa o hay incidencia
     if (status === DeliveryStatus.COMPLETED || status === DeliveryStatus.ISSUE) {
       setManualSequence((prev) => prev.filter((sid) => sid !== id));
     }
@@ -232,6 +252,7 @@ const App: React.FC = () => {
 
     const optimized = optimizeDeliveries(deliveries, startPoint);
     setDeliveries(optimized);
+    setManualSequence(optimized.map((d) => d.id));
   };
 
   const handleMarkerDragEnd = (id: string, coords: [number, number]) => {
@@ -381,6 +402,12 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 <div className="flex gap-4">
+                  <button
+                    type="button"
+                    className="bg-slate-900 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-slate-800 transition-all uppercase text-xs"
+                  >
+                    REGISTRO
+                  </button>
                   <button
                     onClick={handleClearAll}
                     className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"

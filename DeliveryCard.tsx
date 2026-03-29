@@ -8,7 +8,6 @@ import {
   MapPin,
   Navigation,
   Trash2,
-  GripVertical,
   ChevronDown,
   ChevronUp,
   ArrowDownLeft,
@@ -61,12 +60,13 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.8 : 1,
+    opacity: isDragging ? 0.9 : 1,
     cursor:
       delivery.status === DeliveryStatus.COMPLETED ||
       delivery.status === DeliveryStatus.ISSUE
         ? 'default'
         : 'grab',
+    touchAction: 'none',
   };
 
   useEffect(() => {
@@ -149,24 +149,12 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
       ref={setNodeRef}
       style={style}
       {...attributes}
-      onClick={() => {
-        onClick();
-      }}
+      {...listeners}
+      onClick={onClick}
       className={`relative mb-3 rounded-xl border-2 border-l-[6px] transition-all group shadow-sm hover:shadow-md ${
         isSelected ? 'ring-2 ring-blue-500 ring-offset-1' : ''
       } ${styles.border} ${styles.bg} ${styles.side}`}
     >
-      {!isCompleted && !isIssue && (
-        <button
-          type="button"
-          {...listeners}
-          onClick={(e) => e.stopPropagation()}
-          className="absolute left-[-2px] top-1/2 -translate-y-1/2 text-white/80 p-0.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-grab"
-        >
-          <GripVertical size={14} />
-        </button>
-      )}
-
       <div className="pl-4 pr-3 py-3">
         <div className="flex justify-between items-start">
           <div className="flex items-center gap-3 overflow-hidden">
