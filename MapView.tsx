@@ -21,7 +21,6 @@ const MapView: React.FC<MapViewProps> = ({
 }) => {
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
-  const polylineRef = useRef<L.Polyline | null>(null);
 
   const isValidLatLng = (coords: any): coords is [number, number] => {
     return (
@@ -81,30 +80,7 @@ const MapView: React.FC<MapViewProps> = ({
     });
     markersRef.current = {};
 
-    if (polylineRef.current) {
-      try {
-        polylineRef.current.remove();
-      } catch (e) {}
-      polylineRef.current = null;
-    }
-
     const validDeliveries = deliveries.filter((d) => isValidLatLng(d.coordinates));
-
-    if (manualSequence.length >= 2) {
-      const routePoints = manualSequence
-        .map((id) => validDeliveries.find((d) => d.id === id)?.coordinates)
-        .filter((coords): coords is [number, number] => isValidLatLng(coords));
-
-      if (routePoints.length >= 2) {
-        polylineRef.current = L.polyline(routePoints, {
-          color: '#3b82f6',
-          weight: 5,
-          opacity: 0.7,
-          dashArray: '12, 12',
-          lineJoin: 'round',
-        }).addTo(map);
-      }
-    }
 
     validDeliveries.forEach((delivery) => {
       let color = '#3b82f6';

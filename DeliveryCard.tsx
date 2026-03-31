@@ -82,7 +82,6 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     if (isCompleted) {
       return {
         border: 'border-green-200',
-        bg: 'bg-green-50/30',
         accent: 'bg-green-600',
         text: 'text-green-700',
         side: 'border-l-green-500',
@@ -91,7 +90,6 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     if (isIssue) {
       return {
         border: 'border-yellow-200',
-        bg: 'bg-yellow-50/40',
         accent: 'bg-yellow-600',
         text: 'text-yellow-700',
         side: 'border-l-yellow-500',
@@ -100,7 +98,6 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     if (delivery.type === DeliveryType.PICKUP) {
       return {
         border: 'border-red-100',
-        bg: 'bg-red-50/40',
         accent: 'bg-red-600',
         text: 'text-red-700',
         side: 'border-l-red-500',
@@ -108,7 +105,6 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     }
     return {
       border: 'border-blue-100',
-      bg: 'bg-blue-50/40',
       accent: 'bg-blue-600',
       text: 'text-blue-700',
       side: 'border-l-blue-500',
@@ -152,8 +148,10 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
       {...listeners}
       onClick={onClick}
       className={`relative mb-3 rounded-xl border-2 border-l-[6px] transition-all group shadow-sm hover:shadow-md ${
-        isSelected ? 'ring-2 ring-blue-500 ring-offset-1' : ''
-      } ${styles.border} ${styles.bg} ${styles.side}`}
+        isSelected
+          ? 'ring-2 ring-blue-500 ring-offset-1 bg-gradient-to-r from-blue-50 to-blue-100/60'
+          : 'bg-white'
+      } ${styles.border} ${styles.side}`}
     >
       <div className="pl-4 pr-3 py-3">
         <div className="flex justify-between items-start">

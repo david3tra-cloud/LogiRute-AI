@@ -68,9 +68,11 @@ const App: React.FC = () => {
     { latitude: number; longitude: number } | undefined
   >(undefined);
 
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizeMessage, setOptimizeMessage] = useState<string | null>(null);
+
   const recognitionRef = useRef<any>(null);
 
-  // sensores dnd-kit con delay para móvil
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -200,7 +202,7 @@ const App: React.FC = () => {
   };
 
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
-    // Actualizamos estado y enviamos completadas/incidencias al final
+    // igual que en GitHub: reordena activas y completadas
     setDeliveries((prev) => {
       const updated = prev.map((d) =>
         d.id === id ? { ...d, status } : d
@@ -220,7 +222,6 @@ const App: React.FC = () => {
       return [...active, ...done];
     });
 
-    // Sacamos de la secuencia manual si se completa o hay incidencia
     if (status === DeliveryStatus.COMPLETED || status === DeliveryStatus.ISSUE) {
       setManualSequence((prev) => prev.filter((sid) => sid !== id));
     }
@@ -244,15 +245,29 @@ const App: React.FC = () => {
       alert('Activa primero tu ubicación (GPS del dispositivo).');
       return;
     }
+    if (deliveries.length === 0) return;
 
-    const startPoint = {
-      lat: currentUserLoc.latitude,
-      lng: currentUserLoc.longitude,
-    };
+    setIsOptimizing(true);
+    setOptimizeMessage(null);
 
-    const optimized = optimizeDeliveries(deliveries, startPoint);
-    setDeliveries(optimized);
-    setManualSequence(optimized.map((d) => d.id));
+    try {
+      const startPoint = {
+        lat: currentUserLoc.latitude,
+        lng: currentUserLoc.longitude,
+      };
+
+      const optimized = optimizeDeliveries(deliveries, startPoint);
+      setDeliveries(optimized);
+      setManualSequence(optimized.map((d) => d.id));
+      setOptimizeMessage('Ruta optimizada, orden actualizado');
+    } catch (e) {
+      setOptimizeMessage('No se ha podido optimizar la ruta');
+    } finally {
+      setTimeout(() => {
+        setIsOptimizing(false);
+        setOptimizeMessage(null);
+      }, 2000);
+    }
   };
 
   const handleMarkerDragEnd = (id: string, coords: [number, number]) => {
@@ -326,6 +341,17 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
+      {optimizeMessage && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40">
+          <div className="bg-slate-900 text-white text-[10px] sm:text-xs px-4 py-2 rounded-full shadow-lg flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-black uppercase tracking-tight">
+              {optimizeMessage}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* HEADER */}
       <header className="bg-white border-b px-3 py-2 flex items-center justify-between gap-2 z-30 shadow-sm">
         <div className="flex items-center gap-2 min-w-0">
@@ -352,17 +378,28 @@ const App: React.FC = () => {
 
           <div className="hidden sm:flex items-center gap-2">
             <button
-              onClick={handleOptimizeRoute}
-              disabled={!currentUserLoc || deliveries.length === 0}
-              className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase disabled:opacity-40"
+              onClick={() => setIsAdding(true)}
+              className="bg-blue-600 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md hover:bg-blue-700 transition"
             >
-              OPTIMIZAR
+              <Plus size={14} /> Nueva parada
+            </button>
+            <button
+              onClick={handleOptimizeRoute}
+              disabled={isOptimizing || !currentUserLoc || deliveries.length === 0}
+              className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase disabled:opacity-40 hover:bg-blue-50 transition"
+            >
+              {isOptimizing ? 'OPTIMIZANDO…' : 'OPTIMIZAR'}
             </button>
             <button
               type="button"
-              className="bg-black text-yellow-300 px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase"
+              className="flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 text-white text-[9px] sm:text-[10px] font-black uppercase shadow-lg"
             >
-              PRO
+              <img
+                src="/logiroute_icon.jpg"
+                alt="LogiRoute PRO"
+                className="w-5 h-5 rounded-xl shadow-sm"
+              />
+              <span>PRO</span>
             </button>
           </div>
         </div>
@@ -371,17 +408,28 @@ const App: React.FC = () => {
       {/* barra acciones móvil */}
       <div className="sm:hidden bg-white border-b px-3 py-2 flex items-center justify-end gap-2">
         <button
-          onClick={handleOptimizeRoute}
-          disabled={!currentUserLoc || deliveries.length === 0}
-          className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
+          onClick={() => setIsAdding(true)}
+          className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md"
         >
-          OPTIMIZAR
+          <Plus size={14} /> Nueva
+        </button>
+        <button
+          onClick={handleOptimizeRoute}
+          disabled={isOptimizing || !currentUserLoc || deliveries.length === 0}
+          className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
+        >
+          {isOptimizing ? 'OPTIMIZANDO…' : 'OPTIMIZAR'}
         </button>
         <button
           type="button"
-          className="bg-black text-yellow-300 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase"
+          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 text-white text-[10px] font-black uppercase shadow-lg"
         >
-          PRO
+          <img
+            src="/logiroute_icon.jpg"
+            alt="LogiRoute PRO"
+            className="w-4 h-4 rounded-lg shadow-sm"
+          />
+          <span>PRO</span>
         </button>
       </div>
 
@@ -569,13 +617,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      <button
-        onClick={() => setIsAdding(true)}
-        className="fixed bottom-6 right-6 w-16 h-16 bg-blue-600 text-white rounded-2xl shadow-2xl flex items-center justify-center z-40"
-      >
-        <Plus size={32} />
-      </button>
-
+      {/* Modal Nueva Parada */}
       {isAdding && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
           <div className="bg-white rounded-[40px] w-full max-w-xl shadow-2xl overflow-hidden">
@@ -598,7 +640,7 @@ const App: React.FC = () => {
                   onClick={() => setNewType(DeliveryType.DELIVERY)}
                   className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
                     newType === DeliveryType.DELIVERY
-                      ? 'bg-blue-600 text:white shadow-lg'
+                      ? 'bg-blue-600 text-white shadow-lg'
                       : 'text-slate-400'
                   }`}
                 >
@@ -666,7 +708,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                    Coordenadas / Plus Code / Enlace
+                    Coordenadas / Plus Code
                   </label>
                   <div className="relative">
                     <MapPin
@@ -678,7 +720,7 @@ const App: React.FC = () => {
                       value={newCoordsInput}
                       onChange={(e) => setNewCoordsInput(e.target.value)}
                       className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
-                      placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche o enlace maps"
+                      placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche"
                     />
                   </div>
                 </div>
