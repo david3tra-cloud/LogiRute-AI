@@ -136,9 +136,39 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     return googleMapsRegex.test(url);
   };
 
-  const navigationUrl = isValidGoogleMapsUrl(delivery.sourceUrl)
-    ? delivery.sourceUrl!
-    : `https://www.google.com/maps/dir/?api=1&destination=${delivery.coordinates[0]},${delivery.coordinates[1]}`;
+  const buildNavigationUrl = (): string => {
+    const [lat, lng] = delivery.coordinates || [];
+
+    const hasValidCoords =
+      typeof lat === 'number' &&
+      typeof lng === 'number' &&
+      !Number.isNaN(lat) &&
+      !Number.isNaN(lng);
+
+    // PRIORIDAD TOTAL a coordenadas:
+    // así evitamos errores típicos con Plus Codes como "7733+WG La Peña..."
+    if (hasValidCoords) {
+      return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+    }
+
+    // Si no hay coordenadas, entonces sí usamos sourceUrl si es válido
+    if (isValidGoogleMapsUrl(delivery.sourceUrl)) {
+      return delivery.sourceUrl!;
+    }
+
+    // Último fallback: dirección o recipient codificados
+    const query = delivery.address?.trim() || delivery.recipient?.trim() || '';
+
+    if (!query) {
+      return 'https://www.google.com/maps';
+    }
+
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
+      query
+    )}`;
+  };
+
+  const navigationUrl = buildNavigationUrl();
 
   return (
     <div
