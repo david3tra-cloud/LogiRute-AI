@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Loader2, X, Truck, MapPin, Mic, Power, Phone, Tag } from 'lucide-react';
+import { Analytics } from '@vercel/analytics/react';
 import MapView from './MapView';
 import DeliveryCard from './DeliveryCard';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
@@ -765,6 +766,7 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+      <Analytics />
     </div>
   );
 };
