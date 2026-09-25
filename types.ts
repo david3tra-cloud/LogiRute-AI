@@ -1,15 +1,14 @@
-
 export enum DeliveryStatus {
-  PENDING = 'PENDING',
-  IN_PROGRESS = 'IN_PROGRESS',
-  COMPLETED = 'COMPLETED',
-  CANCELLED = 'CANCELLED',
-  ISSUE = 'ISSUE'
+  PENDING = "PENDING",
+  IN_PROGRESS = "IN_PROGRESS",
+  COMPLETED = "COMPLETED",
+  CANCELLED = "CANCELLED",
+  ISSUE = "ISSUE",
 }
 
 export enum DeliveryType {
-  DELIVERY = 'DELIVERY',
-  PICKUP = 'PICKUP'
+  DELIVERY = "DELIVERY",
+  PICKUP = "PICKUP",
 }
 
 export interface Location {
@@ -37,4 +36,24 @@ export interface RouteStats {
   totalTime: number;
   completedStops: number;
   totalStops: number;
+}
+
+export interface DeCA {
+  id: string;
+  fecha: string;
+  cargador: string;
+  transportista: string;
+  destinatario: string;
+  direccionDestino: string;
+  ciudadDestino: string;
+  mercancia: string;
+  pesoOBultos: string;
+  referenciaAlbaran: string;
+  matriculaVehiculo: string;
+  notas: string;
+  estado: "borrador";
+  createdAt: string;
+  updatedAt: string;
+  fotoAlbaran?: string;
+  nombreFotoAlbaran?: string;
 }
