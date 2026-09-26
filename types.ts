@@ -38,6 +38,49 @@ export interface RouteStats {
   totalStops: number;
 }
 
+export interface EmpresaHabitual {
+  id: string;
+  nombre: string;
+  direccion: string;
+  ciudad: string;
+  codigoPostal: string;
+  provincia: string;
+  pais: string;
+  nif: string;
+  telefono: string;
+  email: string;
+  contacto: string;
+  notas: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type Destinatario = EmpresaHabitual;
+
+export interface MatriculaHabitual {
+  id: string;
+  valor: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransportistaHabitual {
+  id: string;
+  nombre: string;
+  nif: string;
+  direccion: string;
+  ciudad: string;
+  codigoPostal: string;
+  provincia: string;
+  pais: string;
+  telefono: string;
+  email: string;
+  notas: string;
+  esPredeterminado: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DeCA {
   id: string;
   fecha: string;
@@ -47,7 +90,9 @@ export interface DeCA {
   direccionDestino: string;
   ciudadDestino: string;
   mercancia: string;
-  pesoOBultos: string;
+  numeroBultos?: string;
+  pesoKg?: string;
+  pesoOBultos?: string;
   referenciaAlbaran: string;
   matriculaVehiculo: string;
   notas: string;
@@ -56,4 +101,13 @@ export interface DeCA {
   updatedAt: string;
   fotoAlbaran?: string;
   nombreFotoAlbaran?: string;
+  transportistaNif?: string;
+  transportistaDireccion?: string;
+  transportistaCiudad?: string;
+  transportistaCodigoPostal?: string;
+  transportistaProvincia?: string;
+  transportistaPais?: string;
+  transportistaTelefono?: string;
+  transportistaEmail?: string;
+  transportistaNotas?: string;
 }
