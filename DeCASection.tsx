@@ -1,5 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ArrowLeft, FileText, Plus, Trash2, Upload } from "lucide-react";
+import {
+  ArrowLeft,
+  CloudUpload,
+  Copy,
+  Download,
+  ExternalLink,
+  FileText,
+  Plus,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   DeCA,
   EmpresaHabitual,
@@ -22,8 +32,23 @@ import {
   DACHSER_SIGNAL_LABELS,
   detectDachserTemplateSignals,
 } from "./decaOcr";
+import { generateDeCAPdf } from "./decaPdfService";
+import {
+  DriveServiceError,
+  isGoogleDriveConfigured,
+  loadGoogleIdentityServices,
+  requestDriveAccessToken,
+  uploadDeCAPdf,
+} from "./googleDriveService";
 
 const STORAGE_KEY = "transport_app_decas";
+type DocumentAction =
+  | "idle"
+  | "generating"
+  | "connecting"
+  | "uploading"
+  | "success"
+  | "error";
 
 type DeCAForm = Pick<
   DeCA,
@@ -1069,6 +1094,8 @@ const DeCASection: React.FC = () => {
   const [plateEditValue, setPlateEditValue] = useState("");
   const [plateManagerMessage, setPlateManagerMessage] = useState("");
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
+  const [documentAction, setDocumentAction] = useState<DocumentAction>("idle");
+  const [documentMessage, setDocumentMessage] = useState("");
   const [view, setView] = useState<SectionView>("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<DeCAForm>(() =>
@@ -1112,6 +1139,14 @@ const DeCASection: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    setDocumentAction("idle");
+    setDocumentMessage("");
+    if (view === "detail" && isGoogleDriveConfigured()) {
+      void loadGoogleIdentityServices().catch(() => undefined);
+    }
+  }, [view, selectedId]);
+
+  useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(decas));
     } catch {
@@ -1147,6 +1182,157 @@ const DeCASection: React.FC = () => {
   }, [transportistas]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
+
+  const persistPdfMetadata = (
+    decaId: string,
+    metadata: Pick<DeCA, "documentoId" | "pdfGeneradoEn">,
+  ) => {
+    setDecas((current) =>
+      current.map((deca) =>
+        deca.id === decaId
+          ? { ...deca, ...metadata, updatedAt: new Date().toISOString() }
+          : deca,
+      ),
+    );
+  };
+
+  const generateSelectedPdf = async (deca: DeCA) => {
+    const findCompany = (name: string) => {
+      const normalizedName = normalizeRecipientText(name);
+      return companies.find(
+        (company) => normalizeRecipientText(company.nombre) === normalizedName,
+      );
+    };
+    return generateDeCAPdf(
+      deca,
+      findCompany(deca.cargador),
+      findCompany(deca.destinatario),
+    );
+  };
+
+  const downloadSelectedPdf = async () => {
+    if (
+      !selectedDeCA ||
+      ["generating", "connecting", "uploading"].includes(documentAction)
+    )
+      return;
+    const deca = selectedDeCA;
+    setDocumentAction("generating");
+    setDocumentMessage("");
+    try {
+      const result = await generateSelectedPdf(deca);
+      persistPdfMetadata(deca.id, {
+        documentoId: result.documentoId,
+        pdfGeneradoEn: result.pdfGeneradoEn,
+      });
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setDocumentAction("success");
+      setDocumentMessage("PDF generado y descargado.");
+    } catch {
+      setDocumentAction("error");
+      setDocumentMessage(
+        "No se pudo generar el PDF. El borrador no se ha modificado.",
+      );
+    }
+  };
+
+  const saveSelectedPdfToDrive = async () => {
+    if (
+      !selectedDeCA ||
+      ["generating", "connecting", "uploading"].includes(documentAction)
+    )
+      return;
+    const deca = selectedDeCA;
+    setDocumentMessage("");
+    try {
+      const accessToken = await requestDriveAccessToken(setDocumentAction);
+      setDocumentAction("generating");
+      const pdf = await generateSelectedPdf(deca);
+      persistPdfMetadata(deca.id, {
+        documentoId: pdf.documentoId,
+        pdfGeneradoEn: pdf.pdfGeneradoEn,
+      });
+      setDocumentAction("uploading");
+      const driveFile = await uploadDeCAPdf({
+        blob: pdf.blob,
+        fileName: pdf.fileName,
+        documentoId: pdf.documentoId,
+        accessToken,
+        existingFileId: deca.driveFileId,
+      });
+      setDecas((current) =>
+        current.map((item) =>
+          item.id === deca.id
+            ? {
+                ...item,
+                documentoId: pdf.documentoId,
+                pdfGeneradoEn: pdf.pdfGeneradoEn,
+                driveFileId: driveFile.fileId,
+                driveFileUrl: driveFile.fileUrl,
+                driveFileNombre: driveFile.fileName,
+                driveSubidoEn: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }
+            : item,
+        ),
+      );
+      setDocumentAction("success");
+      setDocumentMessage("PDF guardado en Google Drive.");
+    } catch (error) {
+      setDocumentAction("error");
+      if (error instanceof DriveServiceError) {
+        const messages: Record<DriveServiceError["kind"], string> = {
+          "not-configured": "Google Drive no está configurado en este entorno.",
+          "origin-not-authorized":
+            "Google no autorizó este origen. Revisa los orígenes JavaScript autorizados del cliente OAuth en Google Cloud Console.",
+          cancelled:
+            "Se canceló el acceso a Google Drive. Puedes volver a intentarlo.",
+          "popup-blocked":
+            "El navegador bloqueó la ventana de acceso. Permite las ventanas emergentes e inténtalo de nuevo.",
+          permission:
+            "No se pudo conceder acceso a Google Drive. Revisa los permisos e inténtalo de nuevo.",
+          network:
+            "No se pudo conectar con Google Drive. Comprueba la conexión e inténtalo de nuevo.",
+          upload:
+            "No se pudo guardar el PDF en Google Drive. El borrador sigue disponible.",
+        };
+        setDocumentMessage(messages[error.kind]);
+      } else {
+        setDocumentMessage(
+          "No se pudo generar el PDF. El borrador no se ha modificado.",
+        );
+      }
+    }
+  };
+
+  const copyDriveLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setDocumentMessage("Enlace copiado.");
+    } catch {
+      const input = document.createElement("textarea");
+      input.value = url;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      setDocumentMessage(
+        copied
+          ? "Enlace copiado."
+          : "No se pudo copiar el enlace desde este navegador.",
+      );
+    }
+  };
 
   const updateField = (field: keyof DeCAForm, value: string) => {
     editedFieldsRef.current.add(field);
@@ -2749,6 +2935,135 @@ const DeCASection: React.FC = () => {
                   </dd>
                 </div>
               </dl>
+              <section
+                aria-labelledby="deca-document-title"
+                className="mt-6 border-y border-slate-200 py-5"
+              >
+                <h2
+                  id="deca-document-title"
+                  className="mb-3 text-sm font-bold text-slate-900"
+                >
+                  Documento PDF
+                </h2>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-label="Descargar PDF del DeCA"
+                    onClick={downloadSelectedPdf}
+                    disabled={[
+                      "generating",
+                      "connecting",
+                      "uploading",
+                    ].includes(documentAction)}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    <Download size={16} aria-hidden="true" /> Descargar PDF
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Guardar PDF del DeCA en Google Drive"
+                    onClick={saveSelectedPdfToDrive}
+                    disabled={
+                      !isGoogleDriveConfigured() ||
+                      ["generating", "connecting", "uploading"].includes(
+                        documentAction,
+                      )
+                    }
+                    className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <CloudUpload size={16} aria-hidden="true" />
+                    Guardar en Google Drive
+                  </button>
+                </div>
+                {!isGoogleDriveConfigured() && (
+                  <p className="mt-3 text-sm text-slate-600">
+                    Google Drive no está configurado en este entorno.
+                  </p>
+                )}
+                {["generating", "connecting", "uploading"].includes(
+                  documentAction,
+                ) && (
+                  <p
+                    className="mt-3 text-sm font-medium text-blue-800"
+                    role="status"
+                  >
+                    {documentAction === "generating" && "Generando PDF…"}
+                    {documentAction === "connecting" &&
+                      "Conectando con Google Drive…"}
+                    {documentAction === "uploading" &&
+                      "Subiendo PDF a Google Drive…"}
+                  </p>
+                )}
+                {documentMessage && (
+                  <p
+                    className={`mt-3 text-sm font-medium ${
+                      documentAction === "error"
+                        ? "text-red-700"
+                        : "text-emerald-700"
+                    }`}
+                    role={documentAction === "error" ? "alert" : "status"}
+                  >
+                    {documentMessage}
+                  </p>
+                )}
+                {selectedDeCA.driveFileId && (
+                  <div className="mt-4 border-t border-slate-100 pt-4">
+                    <p className="break-all text-sm font-semibold text-slate-800">
+                      {selectedDeCA.driveFileNombre ||
+                        "PDF guardado en Google Drive"}
+                    </p>
+                    {selectedDeCA.driveSubidoEn && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        Última actualización:{" "}
+                        {new Date(selectedDeCA.driveSubidoEn).toLocaleString(
+                          "es-ES",
+                        )}
+                      </p>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        aria-label="Abrir archivo en Google Drive"
+                        disabled={[
+                          "generating",
+                          "connecting",
+                          "uploading",
+                        ].includes(documentAction)}
+                        onClick={() =>
+                          window.open(
+                            selectedDeCA.driveFileUrl ||
+                              `https://drive.google.com/file/d/${encodeURIComponent(selectedDeCA.driveFileId!)}/view`,
+                            "_blank",
+                            "noopener,noreferrer",
+                          )
+                        }
+                        className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        <ExternalLink size={15} aria-hidden="true" />
+                        Abrir en Google Drive
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Copiar enlace de Google Drive"
+                        disabled={[
+                          "generating",
+                          "connecting",
+                          "uploading",
+                        ].includes(documentAction)}
+                        onClick={() =>
+                          void copyDriveLink(
+                            selectedDeCA.driveFileUrl ||
+                              `https://drive.google.com/file/d/${encodeURIComponent(selectedDeCA.driveFileId!)}/view`,
+                          )
+                        }
+                        className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        <Copy size={15} aria-hidden="true" /> Copiar enlace
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </section>
               {selectedDeCA.fotoAlbaran && (
                 <section className="mt-6 border-t border-slate-200 pt-5">
                   <h2 className="mb-3 text-sm font-bold text-slate-800">

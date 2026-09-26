@@ -2,6 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+const oauthPopupHeaders = {
+  "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+};
+
 export default defineConfig({
   plugins: [
     react(),
@@ -16,5 +20,9 @@ export default defineConfig({
   ],
   server: {
     port: 3000,
+    headers: oauthPopupHeaders,
+  },
+  preview: {
+    headers: oauthPopupHeaders,
   },
 });

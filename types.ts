@@ -110,4 +110,10 @@ export interface DeCA {
   transportistaTelefono?: string;
   transportistaEmail?: string;
   transportistaNotas?: string;
+  documentoId?: string;
+  pdfGeneradoEn?: string;
+  driveFileId?: string;
+  driveFileUrl?: string;
+  driveFileNombre?: string;
+  driveSubidoEn?: string;
 }
