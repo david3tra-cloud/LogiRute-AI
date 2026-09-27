@@ -45,6 +45,8 @@ import {
   insertUserDeca,
   listUserDecas,
   mapSupabaseDecaToLocal,
+  updateUserDeca,
+  type DecaUpdate,
 } from "./decaSupabaseService";
 
 const STORAGE_KEY = "transport_app_decas";
@@ -1102,6 +1104,7 @@ const DeCASection: React.FC = () => {
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
   const [remoteLoading, setRemoteLoading] = useState(true);
   const [remoteError, setRemoteError] = useState(false);
+  const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
   const [documentAction, setDocumentAction] = useState<DocumentAction>("idle");
   const [documentMessage, setDocumentMessage] = useState("");
   const [view, setView] = useState<SectionView>("list");
@@ -1132,7 +1135,9 @@ const DeCASection: React.FC = () => {
   const ocrWorkerRef = useRef<OCRWorker | null>(null);
   const mountedRef = useRef(true);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
+  const remoteDecaIdsRef = useRef(new Set<string>());
   const newDecaInsertInProgressRef = useRef(false);
+  const remoteEditInProgressRef = useRef(false);
   const skipNextDecaStorageWriteRef = useRef(false);
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
@@ -1185,7 +1190,9 @@ const DeCASection: React.FC = () => {
         const remoteDecas: DeCA[] = [];
         rows.forEach((row) => {
           try {
-            remoteDecas.push(mapSupabaseDecaToLocal(row));
+            const mappedDeCA = mapSupabaseDecaToLocal(row);
+            remoteDecaIdsRef.current.add(mappedDeCA.id);
+            remoteDecas.push(mappedDeCA);
           } catch (error) {
             console.error(
               `Se omitió el DeCA remoto ${row.id} porque no se pudo convertir.`,
@@ -1772,6 +1779,7 @@ const DeCASection: React.FC = () => {
   const handleSave = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedDeCA && newDecaInsertInProgressRef.current) return;
+    if (selectedDeCA && remoteEditInProgressRef.current) return;
 
     const now = new Date().toISOString();
     const savedForm = {
@@ -1786,6 +1794,59 @@ const DeCASection: React.FC = () => {
             : deca,
         ),
       );
+      if (remoteDecaIdsRef.current.has(selectedDeCA.id)) {
+        const supabaseId = selectedDeCA.id;
+        remoteEditInProgressRef.current = true;
+        setIsRemoteEditSaving(true);
+        void (async () => {
+          try {
+            const toNullableNumber = (
+              value: string | undefined,
+              fieldName: string,
+              integer = false,
+            ): number | null => {
+              if (value == null || value.trim() === "") return null;
+              const parsed = Number(value);
+              if (
+                !Number.isFinite(parsed) ||
+                (integer && !Number.isInteger(parsed))
+              ) {
+                throw new Error(`El campo ${fieldName} no es válido.`);
+              }
+              return parsed;
+            };
+            const changes: DecaUpdate = {
+              estado: "BORRADOR",
+              cargador: savedForm.cargador.trim() || null,
+              destinatario: savedForm.destinatario.trim() || null,
+              transportista: savedForm.transportista.trim() || null,
+              transportista_nif: savedForm.transportistaNif?.trim() || null,
+              mercancia: savedForm.mercancia.trim() || null,
+              bultos: toNullableNumber(
+                savedForm.numeroBultos,
+                "número de bultos",
+                true,
+              ),
+              peso_bruto: toNullableNumber(savedForm.pesoKg, "peso bruto"),
+              matricula: savedForm.matriculaVehiculo.trim() || null,
+              destino: savedForm.direccionDestino.trim() || null,
+              observaciones: savedForm.notas.trim() || null,
+            };
+            await updateUserDeca(supabaseId, changes);
+          } catch (error) {
+            console.error(
+              "No se pudo actualizar el DeCA remoto; se conservan los cambios locales.",
+              error,
+            );
+            alert(
+              `Los cambios se guardaron localmente, pero no se pudieron sincronizar con Supabase: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } finally {
+            remoteEditInProgressRef.current = false;
+            if (mountedRef.current) setIsRemoteEditSaving(false);
+          }
+        })();
+      }
     } else {
       const newDeCA: DeCA = {
         ...savedForm,
@@ -1806,6 +1867,7 @@ const DeCASection: React.FC = () => {
           }
 
           const inserted = await insertUserDeca(newDeCA);
+          remoteDecaIdsRef.current.add(inserted.id);
           if (mountedRef.current) {
             setDecas((current) =>
               current.map((deca) =>
@@ -2974,9 +3036,14 @@ const DeCASection: React.FC = () => {
                 <div className="sm:col-span-2 sm:flex sm:justify-end">
                   <button
                     type="submit"
+                    disabled={Boolean(selectedDeCA && isRemoteEditSaving)}
                     className="w-full rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 sm:w-auto"
                   >
-                    {selectedDeCA ? "Guardar cambios" : "Guardar borrador"}
+                    {selectedDeCA && isRemoteEditSaving
+                      ? "Actualizando..."
+                      : selectedDeCA
+                        ? "Guardar cambios"
+                        : "Guardar borrador"}
                   </button>
                 </div>
               </form>
