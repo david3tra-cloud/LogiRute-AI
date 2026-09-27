@@ -40,6 +40,12 @@ import {
   requestDriveAccessToken,
   uploadDeCAPdf,
 } from "./googleDriveService";
+import {
+  getCurrentUserId,
+  insertUserDeca,
+  listUserDecas,
+  mapSupabaseDecaToLocal,
+} from "./decaSupabaseService";
 
 const STORAGE_KEY = "transport_app_decas";
 type DocumentAction =
@@ -1094,6 +1100,8 @@ const DeCASection: React.FC = () => {
   const [plateEditValue, setPlateEditValue] = useState("");
   const [plateManagerMessage, setPlateManagerMessage] = useState("");
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
+  const [remoteLoading, setRemoteLoading] = useState(true);
+  const [remoteError, setRemoteError] = useState(false);
   const [documentAction, setDocumentAction] = useState<DocumentAction>("idle");
   const [documentMessage, setDocumentMessage] = useState("");
   const [view, setView] = useState<SectionView>("list");
@@ -1124,6 +1132,8 @@ const DeCASection: React.FC = () => {
   const ocrWorkerRef = useRef<OCRWorker | null>(null);
   const mountedRef = useRef(true);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
+  const newDecaInsertInProgressRef = useRef(false);
+  const skipNextDecaStorageWriteRef = useRef(false);
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
   formRef.current = form;
@@ -1147,12 +1157,62 @@ const DeCASection: React.FC = () => {
   }, [view, selectedId]);
 
   useEffect(() => {
+    if (remoteLoading) return;
+    if (skipNextDecaStorageWriteRef.current) {
+      skipNextDecaStorageWriteRef.current = false;
+      return;
+    }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(decas));
     } catch {
       // La sección sigue siendo utilizable aunque el navegador no permita persistir.
     }
-  }, [decas]);
+  }, [decas, remoteLoading]);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    const loadRemoteDecas = async () => {
+      try {
+        const userId = await getCurrentUserId();
+        if (!userId) {
+          throw new Error("No hay una sesión autenticada para cargar DeCAs.");
+        }
+
+        const rows = await listUserDecas();
+        if (!isCurrent) return;
+
+        const remoteDecas: DeCA[] = [];
+        rows.forEach((row) => {
+          try {
+            remoteDecas.push(mapSupabaseDecaToLocal(row));
+          } catch (error) {
+            console.error(
+              `Se omitió el DeCA remoto ${row.id} porque no se pudo convertir.`,
+              error,
+            );
+          }
+        });
+
+        skipNextDecaStorageWriteRef.current = true;
+        setDecas(remoteDecas);
+        setRemoteError(false);
+      } catch (error) {
+        if (!isCurrent) return;
+        console.error("No se pudieron cargar los DeCAs remotos.", error);
+        skipNextDecaStorageWriteRef.current = true;
+        setDecas([]);
+        setRemoteError(true);
+      } finally {
+        if (isCurrent) setRemoteLoading(false);
+      }
+    };
+
+    void loadRemoteDecas();
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -1711,6 +1771,8 @@ const DeCASection: React.FC = () => {
 
   const handleSave = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!selectedDeCA && newDecaInsertInProgressRef.current) return;
+
     const now = new Date().toISOString();
     const savedForm = {
       ...form,
@@ -1735,6 +1797,31 @@ const DeCASection: React.FC = () => {
         updatedAt: now,
       };
       setDecas((current) => [newDeCA, ...current]);
+      newDecaInsertInProgressRef.current = true;
+      void (async () => {
+        try {
+          const userId = await getCurrentUserId();
+          if (!userId) {
+            throw new Error("No hay una sesión autenticada.");
+          }
+
+          const inserted = await insertUserDeca(newDeCA);
+          if (mountedRef.current) {
+            setDecas((current) =>
+              current.map((deca) =>
+                deca.id === newDeCA.id ? { ...deca, id: inserted.id } : deca,
+              ),
+            );
+          }
+        } catch (error) {
+          console.error("No se pudo guardar el nuevo DeCA en Supabase.", error);
+          alert(
+            `El DeCA se guardó localmente, pero no se pudo guardar en Supabase: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          newDecaInsertInProgressRef.current = false;
+        }
+      })();
     }
     setSelectedId(null);
     const nextForm = createEmptyForm(
@@ -1966,7 +2053,27 @@ const DeCASection: React.FC = () => {
           />
         )}
 
-        {view === "list" && (
+        {view === "list" && remoteLoading && (
+          <p
+            className="border-y border-slate-200 bg-white px-5 py-6 text-center text-sm text-slate-600"
+            role="status"
+          >
+            Cargando DeCAs...
+          </p>
+        )}
+
+        {view === "list" && remoteError && (
+          <p
+            className="border-y border-amber-200 bg-amber-50 px-5 py-6 text-center text-sm text-amber-900"
+            role="status"
+          >
+            No se han podido cargar tus DeCAs desde el servidor. Tus datos
+            locales se conservan y no se mostrarán automáticamente por
+            seguridad.
+          </p>
+        )}
+
+        {view === "list" && !remoteLoading && !remoteError && (
           <>
             <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
               <div>

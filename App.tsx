@@ -7,11 +7,15 @@ import {
   MapPin,
   Mic,
   Power,
+  LogOut,
   Phone,
   Tag,
 } from "lucide-react";
+import type { User } from "@supabase/supabase-js";
 import MapView from "./MapView";
 import DeliveryCard from "./DeliveryCard";
+import Auth from "./lib/Auth";
+import { supabase } from "./lib/supabase";
 import { Delivery, DeliveryStatus, DeliveryType } from "./types";
 import DeCASection from "./DeCASection";
 import BillingSection from "./BillingSection";
@@ -49,6 +53,8 @@ const safeGetItem = (key: string) => {
 };
 
 const App: React.FC = () => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [activeModule, setActiveModule] = useState<
     "routes" | "decas" | "billing"
   >("decas");
@@ -102,6 +108,33 @@ const App: React.FC = () => {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void supabase.auth.getSession().then(
+      ({ data: { session } }) => {
+        if (!isMounted) return;
+        setUser(session?.user ?? null);
+        setIsAuthLoading(false);
+      },
+      () => {
+        if (isMounted) setIsAuthLoading(false);
+      },
+    );
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setIsAuthLoading(false);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (isAppClosed) return;
@@ -160,6 +193,11 @@ const App: React.FC = () => {
       setIsListening(true);
       recognition.start();
     }
+  };
+
+  const handleSignOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) alert("No se pudo cerrar la sesión. Inténtalo de nuevo.");
   };
 
   const handleAddDelivery = async (e: React.FormEvent) => {
@@ -310,20 +348,6 @@ const App: React.FC = () => {
     setSelectedId((prev) => (prev === id ? null : id));
   };
 
-  if (isAppClosed) {
-    return (
-      <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
-        <Power size={80} className="text-white mb-8 animate-pulse" />
-        <button
-          onClick={() => window.location.reload()}
-          className="bg-blue-600 text-white px-10 py-5 rounded-3xl font-black shadow-xl uppercase"
-        >
-          Nueva Jornada
-        </button>
-      </div>
-    );
-  }
-
   const pendingCount = deliveries.filter(
     (d) =>
       d.status === DeliveryStatus.PENDING ||
@@ -349,6 +373,30 @@ const App: React.FC = () => {
     return [...inSequence, ...remaining];
   }, [deliveries, manualSequence]);
 
+  if (isAuthLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        Cargando...
+      </div>
+    );
+  }
+
+  if (!user) return <Auth />;
+
+  if (isAppClosed) {
+    return (
+      <div className="fixed inset-0 bg-slate-900 flex flex-col items-center justify-center text-center p-6">
+        <Power size={80} className="text-white mb-8 animate-pulse" />
+        <button
+          onClick={() => window.location.reload()}
+          className="bg-blue-600 text-white px-10 py-5 rounded-3xl font-black shadow-xl uppercase"
+        >
+          Nueva Jornada
+        </button>
+      </div>
+    );
+  }
+
   const handleDragEndList = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!active || !over || active.id === over.id) return;
@@ -365,7 +413,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
-      <header className="z-50 flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 py-2 shadow-sm sm:px-6">
+      <header className="z-50 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 shadow-sm sm:flex-nowrap sm:gap-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-2">
           <Truck className="shrink-0 text-blue-600" size={22} />
           <span className="truncate text-sm font-black text-slate-800 sm:text-base">
@@ -374,7 +422,7 @@ const App: React.FC = () => {
         </div>
         <nav
           aria-label="Secciones principales"
-          className="flex shrink-0 items-center gap-1 rounded-xl bg-slate-100 p-1"
+          className="order-3 flex w-full shrink-0 items-center justify-center gap-1 rounded-xl bg-slate-100 p-1 sm:order-none sm:w-auto"
         >
           {[
             { id: "routes", label: "Rutas" },
@@ -398,6 +446,14 @@ const App: React.FC = () => {
             </button>
           ))}
         </nav>
+        <button
+          type="button"
+          onClick={handleSignOut}
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-2 text-[10px] font-bold text-slate-600 transition hover:bg-slate-100 sm:text-xs"
+        >
+          <LogOut size={15} />
+          Cerrar sesión
+        </button>
       </header>
 
       <div
@@ -529,7 +585,7 @@ const App: React.FC = () => {
                         onClick={handleClearAll}
                         className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
                       >
-                        <Power size={20} /> Cerrar Sesión
+                        <Power size={20} /> Cerrar jornada
                       </button>
                     </div>
                   </div>
