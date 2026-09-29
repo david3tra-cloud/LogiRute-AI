@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
   mapSupabaseEmpresaHabitualToLocal,
 } from "./empresasHabitualesSupabaseService";
@@ -27,6 +28,7 @@ import {
   EMPRESAS_STORAGE_KEY,
   loadEmpresas,
   normalizeRecipientText,
+  recipientDuplicateKey,
 } from "./destinatariosService";
 import {
   getImageDimensions,
@@ -1073,6 +1075,10 @@ const DeCASection: React.FC = () => {
       ? `Se han migrado ${initialCompanyLoad.migratedCount} destinatarios a Empresas habituales.`
       : "",
   );
+  const [hasPendingCompanyMigration, setHasPendingCompanyMigration] =
+    useState(false);
+  const [isMigratingCompanies, setIsMigratingCompanies] = useState(false);
+  const [companyMigrationError, setCompanyMigrationError] = useState("");
   const [companyManagerAction, setCompanyManagerAction] = useState<
     "create" | "import" | undefined
   >(undefined);
@@ -1138,6 +1144,7 @@ const DeCASection: React.FC = () => {
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const ocrWorkerRef = useRef<OCRWorker | null>(null);
   const mountedRef = useRef(true);
+  const companyMigrationInProgressRef = useRef(false);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
   const remoteDecaIdsRef = useRef(new Set<string>());
   const newDecaInsertInProgressRef = useRef(false);
@@ -1235,13 +1242,16 @@ const DeCASection: React.FC = () => {
 
         const remoteCompanies = rows.map(mapSupabaseEmpresaHabitualToLocal);
         if (remoteCompanies.length > 0) {
+          setHasPendingCompanyMigration(false);
           setCompanies(remoteCompanies);
           setCompanyMigrationNotice("");
         } else if (companies.length > 0) {
+          setHasPendingCompanyMigration(true);
           setCompanyMigrationNotice(
             `Hay ${companies.length} empresas locales pendientes de sincronizar con Supabase.`,
           );
         } else {
+          setHasPendingCompanyMigration(false);
           setCompanies([]);
           setCompanyMigrationNotice("");
         }
@@ -1566,6 +1576,96 @@ const DeCASection: React.FC = () => {
   const updateCompanies = (next: EmpresaHabitual[]) => {
     setCompanies(next);
     setCompanyStorageWarning(false);
+  };
+
+  const migrateLocalCompanies = async () => {
+    if (!hasPendingCompanyMigration || companyMigrationInProgressRef.current) {
+      return;
+    }
+
+    companyMigrationInProgressRef.current = true;
+    setIsMigratingCompanies(true);
+    setCompanyMigrationError("");
+
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        throw new Error("No hay una sesión autenticada.");
+      }
+
+      const existingRows = await listUserEmpresasHabituales();
+      const existingKeys = new Set(
+        existingRows.map((row) =>
+          recipientDuplicateKey(mapSupabaseEmpresaHabitualToLocal(row)),
+        ),
+      );
+      const failedCompanies: { company: EmpresaHabitual; error: unknown }[] =
+        [];
+
+      for (const company of companies) {
+        const key = recipientDuplicateKey(company);
+        if (existingKeys.has(key)) continue;
+
+        try {
+          const insertedRow = await insertUserEmpresaHabitual({
+            user_id: userId,
+            nombre: company.nombre,
+            direccion: company.direccion || null,
+            ciudad: company.ciudad || null,
+            codigo_postal: company.codigoPostal || null,
+            provincia: company.provincia || null,
+            pais: company.pais || null,
+            nif: company.nif || null,
+            telefono: company.telefono || null,
+            email: company.email || null,
+            contacto: company.contacto || null,
+            notas: company.notas || null,
+          });
+          existingKeys.add(
+            recipientDuplicateKey(
+              mapSupabaseEmpresaHabitualToLocal(insertedRow),
+            ),
+          );
+        } catch (error) {
+          failedCompanies.push({ company, error });
+        }
+      }
+
+      const refreshedRows = await listUserEmpresasHabituales();
+      const remoteCompanies = refreshedRows.map(
+        mapSupabaseEmpresaHabitualToLocal,
+      );
+      const remoteKeys = new Set(remoteCompanies.map(recipientDuplicateKey));
+      const pendingFailures = failedCompanies.filter(
+        ({ company }) => !remoteKeys.has(recipientDuplicateKey(company)),
+      );
+      const pendingCompanies = pendingFailures.map(({ company }) => company);
+
+      setCompanies([...remoteCompanies, ...pendingCompanies]);
+      setHasPendingCompanyMigration(pendingCompanies.length > 0);
+      setCompanyMigrationNotice(
+        pendingCompanies.length === 0
+          ? ""
+          : `Quedan ${pendingCompanies.length} empresas locales pendientes de sincronizar con Supabase.`,
+      );
+
+      if (pendingFailures.length > 0) {
+        const firstError = pendingFailures[0].error;
+        const details =
+          firstError instanceof Error ? ` ${firstError.message}` : "";
+        setCompanyMigrationError(
+          `No se pudieron sincronizar ${pendingCompanies.length} empresas. Se conservan localmente.${details}`,
+        );
+      }
+    } catch (error) {
+      const details = error instanceof Error ? ` ${error.message}` : "";
+      setCompanyMigrationError(
+        `No se pudo completar la sincronización. Las empresas locales se conservan.${details}`,
+      );
+    } finally {
+      companyMigrationInProgressRef.current = false;
+      setIsMigratingCompanies(false);
+    }
   };
 
   const openTransportistaManager = () => {
@@ -2102,6 +2202,27 @@ const DeCASection: React.FC = () => {
             className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800"
           >
             {companyMigrationNotice}
+          </p>
+        )}
+        {hasPendingCompanyMigration && companies.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void migrateLocalCompanies()}
+            disabled={isMigratingCompanies}
+            className="mb-4 inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <CloudUpload aria-hidden="true" size={16} />
+            {isMigratingCompanies
+              ? "Sincronizando empresas..."
+              : "Sincronizar empresas locales"}
+          </button>
+        )}
+        {companyMigrationError && (
+          <p
+            role="alert"
+            className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-800"
+          >
+            {companyMigrationError}
           </p>
         )}
         {companyStorageWarning && (
