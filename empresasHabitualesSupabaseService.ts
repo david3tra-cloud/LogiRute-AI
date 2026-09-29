@@ -1,5 +1,6 @@
 ﻿import { supabase } from "./lib/supabase";
 import type { Database } from "./database.types";
+import type { EmpresaHabitual } from "./types";
 
 export type EmpresaHabitualRow =
   Database["public"]["Tables"]["empresas_habituales"]["Row"];
@@ -164,4 +165,24 @@ export async function deleteUserEmpresaHabitual(
   }
 
   return { deleted: data !== null };
+}
+export function mapSupabaseEmpresaHabitualToLocal(
+  row: EmpresaHabitualRow,
+): EmpresaHabitual {
+  return {
+    id: row.id,
+    nombre: row.nombre,
+    direccion: row.direccion ?? "",
+    ciudad: row.ciudad ?? "",
+    codigoPostal: row.codigo_postal ?? "",
+    provincia: row.provincia ?? "",
+    pais: row.pais ?? "",
+    nif: row.nif ?? "",
+    telefono: row.telefono ?? "",
+    email: row.email ?? "",
+    contacto: row.contacto ?? "",
+    notas: row.notas ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }

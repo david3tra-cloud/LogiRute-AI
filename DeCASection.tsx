@@ -1,5 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  listUserEmpresasHabituales,
+  mapSupabaseEmpresaHabitualToLocal,
+} from "./empresasHabitualesSupabaseService";
+import {
   ArrowLeft,
   CloudUpload,
   Copy,
@@ -1216,6 +1220,41 @@ const DeCASection: React.FC = () => {
     };
 
     void loadRemoteDecas();
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    const loadRemoteEmpresas = async () => {
+      try {
+        const rows = await listUserEmpresasHabituales();
+        if (!isCurrent) return;
+
+        const remoteCompanies = rows.map(mapSupabaseEmpresaHabitualToLocal);
+        if (remoteCompanies.length > 0) {
+          setCompanies(remoteCompanies);
+          setCompanyMigrationNotice("");
+        } else if (companies.length > 0) {
+          setCompanyMigrationNotice(
+            `Hay ${companies.length} empresas locales pendientes de sincronizar con Supabase.`,
+          );
+        } else {
+          setCompanies([]);
+          setCompanyMigrationNotice("");
+        }
+      } catch (error) {
+        console.error(
+          "No se pudieron cargar las empresas habituales desde Supabase. Se mantiene el respaldo local.",
+          error,
+        );
+      }
+    };
+
+    void loadRemoteEmpresas();
+
     return () => {
       isCurrent = false;
     };
