@@ -3,6 +3,7 @@ import {
   insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
   mapSupabaseEmpresaHabitualToLocal,
+  updateUserEmpresaHabitual,
 } from "./empresasHabitualesSupabaseService";
 import {
   ArrowLeft,
@@ -1079,6 +1080,7 @@ const DeCASection: React.FC = () => {
     useState(false);
   const [isMigratingCompanies, setIsMigratingCompanies] = useState(false);
   const [companyMigrationError, setCompanyMigrationError] = useState("");
+  const [companyUpdateError, setCompanyUpdateError] = useState("");
   const [companyManagerAction, setCompanyManagerAction] = useState<
     "create" | "import" | undefined
   >(undefined);
@@ -1574,8 +1576,56 @@ const DeCASection: React.FC = () => {
   };
 
   const updateCompanies = (next: EmpresaHabitual[]) => {
+    const changedCompanies = next.filter((company) => {
+      const current = companies.find((item) => item.id === company.id);
+      return (
+        current !== undefined &&
+        (current.nombre !== company.nombre ||
+          current.direccion !== company.direccion ||
+          current.ciudad !== company.ciudad ||
+          current.codigoPostal !== company.codigoPostal ||
+          current.provincia !== company.provincia ||
+          current.pais !== company.pais ||
+          current.nif !== company.nif ||
+          current.telefono !== company.telefono ||
+          current.email !== company.email ||
+          current.contacto !== company.contacto ||
+          current.notas !== company.notas)
+      );
+    });
+
     setCompanies(next);
     setCompanyStorageWarning(false);
+    setCompanyUpdateError("");
+
+    if (changedCompanies.length === 0) return;
+
+    void Promise.allSettled(
+      changedCompanies.map((company) =>
+        updateUserEmpresaHabitual(company.id, {
+          nombre: company.nombre,
+          direccion: company.direccion || null,
+          ciudad: company.ciudad || null,
+          codigo_postal: company.codigoPostal || null,
+          provincia: company.provincia || null,
+          pais: company.pais || null,
+          nif: company.nif || null,
+          telefono: company.telefono || null,
+          email: company.email || null,
+          contacto: company.contacto || null,
+          notas: company.notas || null,
+        }),
+      ),
+    ).then((results) => {
+      const failedCount = results.filter(
+        (result) => result.status === "rejected",
+      ).length;
+      setCompanyUpdateError(
+        failedCount === 0
+          ? ""
+          : `Fallaron ${failedCount} actualizaciones de empresas habituales en Supabase. Los cambios se conservaron localmente.`,
+      );
+    });
   };
 
   const migrateLocalCompanies = async () => {
@@ -2223,6 +2273,14 @@ const DeCASection: React.FC = () => {
             className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-800"
           >
             {companyMigrationError}
+          </p>
+        )}
+        {companyUpdateError && (
+          <p
+            role="alert"
+            className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-800"
+          >
+            {companyUpdateError}
           </p>
         )}
         {companyStorageWarning && (
