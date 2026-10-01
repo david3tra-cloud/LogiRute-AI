@@ -25,6 +25,12 @@ import {
 import DestinatariosManager from "./DestinatariosManager";
 import TransportistasManager from "./TransportistasManager";
 import {
+  listUserTransportistasHabituales,
+  mapSupabaseTransportistaHabitualToLocal,
+  migrateUserTransportistasHabituales,
+  syncUserTransportistasHabituales,
+} from "./transportistasHabitualesSupabaseService";
+import {
   createRecipientId,
   EMPRESAS_STORAGE_KEY,
   loadEmpresas,
@@ -897,6 +903,65 @@ const getToday = () => {
 
 const MATRICULAS_STORAGE_KEY = "logiroute_matriculas_v1";
 const TRANSPORTISTAS_STORAGE_KEY = "logiroute_transportistas_v1";
+const TRANSPORTISTAS_DELETES_STORAGE_KEY =
+  "logiroute_transportistas_pending_deletes_v1";
+const TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY =
+  "logiroute_transportistas_pending_sync_v1";
+
+type PendingTransportistaDelete = { id: string; token: number };
+type QueueResult<T> = { ok: true; value: T } | { ok: false; error: Error };
+
+const isPendingTransportistaDelete = (
+  value: unknown,
+): value is PendingTransportistaDelete =>
+  typeof value === "object" &&
+  value !== null &&
+  "id" in value &&
+  typeof value.id === "string" &&
+  "token" in value &&
+  typeof value.token === "number";
+
+const loadPendingTransportistaDeletes = (): PendingTransportistaDelete[] => {
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(TRANSPORTISTAS_DELETES_STORAGE_KEY) ?? "[]",
+    );
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every(
+        (item) =>
+          typeof item === "string" || isPendingTransportistaDelete(item),
+      )
+    ) {
+      return [];
+    }
+    return parsed.map((item, index) =>
+      typeof item === "string" ? { id: item, token: index + 1 } : item,
+    );
+  } catch {
+    return [];
+  }
+};
+
+const loadTransportistaPendingSync = (): boolean => {
+  try {
+    return (
+      localStorage.getItem(TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY) === "true"
+    );
+  } catch {
+    return false;
+  }
+};
+
+const normalizeTransportistaDefaults = (
+  items: TransportistaHabitual[],
+): TransportistaHabitual[] => {
+  const defaultId = items.find((item) => item.esPredeterminado)?.id;
+  return items.map((item) => ({
+    ...item,
+    esPredeterminado: item.id === defaultId,
+  }));
+};
 
 const loadTransportistas = (): {
   items: TransportistaHabitual[];
@@ -1091,6 +1156,18 @@ const DeCASection: React.FC = () => {
   );
   const [transportistaStorageWarning, setTransportistaStorageWarning] =
     useState(initialTransportistaLoad.invalid);
+  const [transportistaLoadError, setTransportistaLoadError] = useState("");
+  const [transportistaSyncError, setTransportistaSyncError] = useState("");
+  const [hasPendingTransportistaChanges, setHasPendingTransportistaChanges] =
+    useState(
+      () =>
+        loadTransportistaPendingSync() ||
+        loadPendingTransportistaDeletes().length > 0,
+    );
+  const [isMigratingTransportistas, setIsMigratingTransportistas] =
+    useState(false);
+  const [transportistaSyncEnabled, setTransportistaSyncEnabled] =
+    useState(false);
   const transportistaManagerReturnView = useRef<SectionView>("list");
   const [transportistaQuery, setTransportistaQuery] = useState("");
   const [transportistaPickerOpen, setTransportistaPickerOpen] = useState(false);
@@ -1147,6 +1224,21 @@ const DeCASection: React.FC = () => {
   const ocrWorkerRef = useRef<OCRWorker | null>(null);
   const mountedRef = useRef(true);
   const companyMigrationInProgressRef = useRef(false);
+  const transportistasRef = useRef(initialTransportistaLoad.items);
+  const pendingTransportistaDeletesRef = useRef(
+    loadPendingTransportistaDeletes(),
+  );
+  const transportistaSyncEnabledRef = useRef(false);
+  const transportistaMigrationInProgressRef = useRef(false);
+  const transportistaSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const transportistaRevisionRef = useRef(0);
+  const transportistaDeleteTokenRef = useRef(
+    Math.max(
+      0,
+      ...pendingTransportistaDeletesRef.current.map((item) => item.token),
+    ),
+  );
+  const transportistaRemoteLoadVersionRef = useRef(0);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
   const remoteDecaIdsRef = useRef(new Set<string>());
   const newDecaInsertInProgressRef = useRef(false);
@@ -1155,6 +1247,115 @@ const DeCASection: React.FC = () => {
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
   formRef.current = form;
+
+  const persistTransportistasLocally = (
+    items: TransportistaHabitual[],
+    pendingDeletes: PendingTransportistaDelete[],
+  ): boolean => {
+    try {
+      localStorage.setItem(TRANSPORTISTAS_STORAGE_KEY, JSON.stringify(items));
+      localStorage.setItem(
+        TRANSPORTISTAS_DELETES_STORAGE_KEY,
+        JSON.stringify(pendingDeletes),
+      );
+      setTransportistaStorageWarning(false);
+      return true;
+    } catch {
+      setTransportistaStorageWarning(true);
+      return false;
+    }
+  };
+
+  const persistTransportistaPendingSync = (pending: boolean) => {
+    try {
+      localStorage.setItem(
+        TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY,
+        String(pending),
+      );
+    } catch {
+      setTransportistaStorageWarning(true);
+    }
+  };
+
+  const enqueueTransportistaOperation = <T,>(
+    operation: () => Promise<T>,
+    failureMessage: string,
+  ): Promise<QueueResult<T>> => {
+    const queuedTask = transportistaSyncQueueRef.current
+      .catch(() => undefined)
+      .then(operation)
+      .then((value): QueueResult<T> => {
+        setTransportistaSyncError("");
+        return { ok: true, value };
+      })
+      .catch((error: unknown): QueueResult<T> => {
+        const normalizedError =
+          error instanceof Error ? error : new Error(String(error));
+        setTransportistaSyncError(
+          `${failureMessage} ${normalizedError.message}`,
+        );
+        setHasPendingTransportistaChanges(true);
+        persistTransportistaPendingSync(true);
+        return { ok: false, error: normalizedError };
+      });
+    transportistaSyncQueueRef.current = queuedTask.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queuedTask;
+  };
+
+  const acknowledgeTransportistaDeletes = (
+    attempted: PendingTransportistaDelete[],
+    result: {
+      confirmedDeletedLocalIds: string[];
+      cancelledLocalIds: string[];
+    },
+  ) => {
+    const completedIds = new Set([
+      ...result.confirmedDeletedLocalIds,
+      ...result.cancelledLocalIds,
+    ]);
+    const attemptedTokens = new Set(attempted.map((entry) => entry.token));
+    pendingTransportistaDeletesRef.current =
+      pendingTransportistaDeletesRef.current.filter(
+        (entry) =>
+          !(attemptedTokens.has(entry.token) && completedIds.has(entry.id)),
+      );
+    persistTransportistasLocally(
+      transportistasRef.current,
+      pendingTransportistaDeletesRef.current,
+    );
+  };
+
+  const enqueueTransportistaSync = async (): Promise<QueueResult<number>> => {
+    const result = await enqueueTransportistaOperation(async () => {
+      const revisionAtStart = transportistaRevisionRef.current;
+      const attempted = [...pendingTransportistaDeletesRef.current];
+      const deleteResult = await syncUserTransportistasHabituales(
+        transportistasRef.current,
+        attempted.map((entry) => entry.id),
+        (localId) =>
+          !transportistasRef.current.some((item) => item.id === localId),
+      );
+      acknowledgeTransportistaDeletes(attempted, deleteResult);
+      if (deleteResult.failedDeletes.length > 0) {
+        throw new Error(
+          `Fallaron ${deleteResult.failedDeletes.length} borrados remotos.`,
+        );
+      }
+      return revisionAtStart;
+    }, "No se pudo sincronizar. Los cambios siguen guardados localmente.");
+
+    if (result.ok) {
+      const stillPending =
+        transportistaRevisionRef.current !== result.value ||
+        pendingTransportistaDeletesRef.current.length > 0;
+      setHasPendingTransportistaChanges(stillPending);
+      persistTransportistaPendingSync(stillPending);
+    }
+    return result;
+  };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1298,6 +1499,68 @@ const DeCASection: React.FC = () => {
       setTransportistaStorageWarning(true);
     }
   }, [transportistas]);
+
+  useEffect(() => {
+    if (view !== "carriers") return;
+    let active = true;
+    const version = ++transportistaRemoteLoadVersionRef.current;
+    setTransportistaLoadError("");
+
+    const loadRemoteTransportistas = async () => {
+      try {
+        const rows = await listUserTransportistasHabituales();
+        if (!active || version !== transportistaRemoteLoadVersionRef.current) {
+          return;
+        }
+
+        const pendingIds = new Set(
+          pendingTransportistaDeletesRef.current.map((item) => item.id),
+        );
+        const remoteItems = rows
+          .map(mapSupabaseTransportistaHabitualToLocal)
+          .filter((item) => !pendingIds.has(item.id));
+        const merged = new Map(remoteItems.map((item) => [item.id, item]));
+        for (const item of transportistasRef.current) merged.set(item.id, item);
+
+        const localDefault = transportistasRef.current.find(
+          (item) => item.esPredeterminado,
+        );
+        const defaultId =
+          localDefault?.id ??
+          remoteItems.find((item) => item.esPredeterminado)?.id;
+        const normalized = normalizeTransportistaDefaults(
+          [...merged.values()].map((item) => ({
+            ...item,
+            esPredeterminado: item.id === defaultId,
+          })),
+        );
+        const hasLocalPending =
+          pendingTransportistaDeletesRef.current.length > 0 ||
+          loadTransportistaPendingSync();
+
+        transportistasRef.current = normalized;
+        setTransportistas(normalized);
+        setHasPendingTransportistaChanges(hasLocalPending);
+        persistTransportistasLocally(
+          normalized,
+          pendingTransportistaDeletesRef.current,
+        );
+      } catch (error) {
+        if (!active || version !== transportistaRemoteLoadVersionRef.current) {
+          return;
+        }
+        const details = error instanceof Error ? ` ${error.message}` : "";
+        setTransportistaLoadError(
+          `No se pudieron cargar los transportistas remotos. Se conserva el catálogo local.${details}`,
+        );
+      }
+    };
+
+    void loadRemoteTransportistas();
+    return () => {
+      active = false;
+    };
+  }, [view]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
 
@@ -1725,8 +1988,129 @@ const DeCASection: React.FC = () => {
   };
 
   const updateTransportistas = (next: TransportistaHabitual[]) => {
-    setTransportistas(next);
+    ++transportistaRemoteLoadVersionRef.current;
+    const previous = transportistasRef.current;
+    const normalized = normalizeTransportistaDefaults(next);
+    const deletedIds = previous
+      .filter((item) => !normalized.some((nextItem) => nextItem.id === item.id))
+      .map((item) => item.id);
+
+    transportistasRef.current = normalized;
+    transportistaRevisionRef.current += 1;
+    pendingTransportistaDeletesRef.current =
+      pendingTransportistaDeletesRef.current.filter(
+        (entry) => !normalized.some((item) => item.id === entry.id),
+      );
+    for (const id of deletedIds) {
+      if (
+        !pendingTransportistaDeletesRef.current.some((entry) => entry.id === id)
+      ) {
+        pendingTransportistaDeletesRef.current.push({
+          id,
+          token: ++transportistaDeleteTokenRef.current,
+        });
+      }
+    }
+
+    setTransportistas(normalized);
     setTransportistaStorageWarning(false);
+    const persisted = persistTransportistasLocally(
+      normalized,
+      pendingTransportistaDeletesRef.current,
+    );
+    if (transportistaSyncEnabledRef.current) {
+      setHasPendingTransportistaChanges(true);
+      persistTransportistaPendingSync(true);
+    }
+    if (persisted && transportistaSyncEnabledRef.current) {
+      void enqueueTransportistaSync();
+    }
+  };
+
+  const migrateLocalTransportistas = async (): Promise<void> => {
+    if (transportistaMigrationInProgressRef.current) return;
+    if (
+      !persistTransportistasLocally(
+        transportistasRef.current,
+        pendingTransportistaDeletesRef.current,
+      )
+    ) {
+      setTransportistaSyncError(
+        "No se pudo guardar el catálogo local; no se inició la migración.",
+      );
+      return;
+    }
+
+    transportistaMigrationInProgressRef.current = true;
+    ++transportistaRemoteLoadVersionRef.current;
+    const revisionAtStart = transportistaRevisionRef.current;
+    const attempted = [...pendingTransportistaDeletesRef.current];
+    setIsMigratingTransportistas(true);
+    setHasPendingTransportistaChanges(true);
+    persistTransportistaPendingSync(true);
+    setTransportistaSyncError("");
+
+    const migrationTask = enqueueTransportistaOperation(async () => {
+      const result = await migrateUserTransportistasHabituales(
+        transportistasRef.current,
+        attempted.map((entry) => entry.id),
+        (localId) =>
+          !transportistasRef.current.some((item) => item.id === localId),
+      );
+      acknowledgeTransportistaDeletes(attempted, result);
+      if (result.failedDeletes.length > 0) {
+        throw new Error(
+          `Fallaron ${result.failedDeletes.length} borrados durante la migración.`,
+        );
+      }
+      return result.items;
+    }, "No se pudo completar la migración. Los datos locales se conservan.");
+
+    try {
+      const migrationResult = await migrationTask;
+      if (!migrationResult.ok) return;
+
+      const latestLocalItems = transportistasRef.current;
+      const latestLocalIds = new Set(latestLocalItems.map((item) => item.id));
+      const pendingDeleteIds = new Set(
+        pendingTransportistaDeletesRef.current.map((entry) => entry.id),
+      );
+      const merged = new Map<string, TransportistaHabitual>();
+      for (const item of migrationResult.value) {
+        if (!pendingDeleteIds.has(item.id) || latestLocalIds.has(item.id)) {
+          merged.set(item.id, item);
+        }
+      }
+      for (const item of latestLocalItems) merged.set(item.id, item);
+
+      const normalized = normalizeTransportistaDefaults([...merged.values()]);
+      transportistasRef.current = normalized;
+      setTransportistas(normalized);
+      persistTransportistasLocally(
+        normalized,
+        pendingTransportistaDeletesRef.current,
+      );
+
+      transportistaSyncEnabledRef.current = true;
+      setTransportistaSyncEnabled(true);
+      const changedDuringMigration =
+        transportistaRevisionRef.current !== revisionAtStart;
+      const stillPending =
+        changedDuringMigration ||
+        pendingTransportistaDeletesRef.current.length > 0;
+      setHasPendingTransportistaChanges(stillPending);
+      persistTransportistaPendingSync(stillPending);
+      if (changedDuringMigration) {
+        const syncResult = await enqueueTransportistaSync();
+        if (!syncResult.ok) {
+          setHasPendingTransportistaChanges(true);
+          persistTransportistaPendingSync(true);
+        }
+      }
+    } finally {
+      transportistaMigrationInProgressRef.current = false;
+      setIsMigratingTransportistas(false);
+    }
   };
 
   const handlePhotoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -2326,11 +2710,59 @@ const DeCASection: React.FC = () => {
         )}
 
         {view === "carriers" && (
-          <TransportistasManager
-            transportistas={transportistas}
-            onChange={updateTransportistas}
-            onClose={() => setView(transportistaManagerReturnView.current)}
-          />
+          <>
+            <p role="status" className="mb-3 text-sm text-slate-600">
+              {isMigratingTransportistas
+                ? "Migrando transportistas..."
+                : transportistaSyncEnabled
+                  ? hasPendingTransportistaChanges
+                    ? "Hay cambios locales pendientes o con error."
+                    : "Sincronización activada."
+                  : "Sincronización no activada; los cambios se guardan localmente."}
+            </p>
+            {transportistaLoadError && (
+              <p
+                role="status"
+                className="mb-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900"
+              >
+                {transportistaLoadError}
+              </p>
+            )}
+            {transportistaSyncError && (
+              <p
+                role="alert"
+                className="mb-3 rounded-lg bg-red-50 p-3 text-sm text-red-800"
+              >
+                {transportistaSyncError}
+              </p>
+            )}
+            <div className="mb-4">
+              <button
+                type="button"
+                onClick={() => {
+                  if (transportistaSyncEnabledRef.current) {
+                    void enqueueTransportistaSync();
+                  } else {
+                    void migrateLocalTransportistas();
+                  }
+                }}
+                disabled={isMigratingTransportistas}
+                className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+              >
+                <CloudUpload aria-hidden="true" size={16} />
+                {isMigratingTransportistas
+                  ? "Migrando transportistas..."
+                  : transportistaSyncEnabled
+                    ? "Reintentar sincronización"
+                    : "Migrar y activar sincronización"}
+              </button>
+            </div>
+            <TransportistasManager
+              transportistas={transportistas}
+              onChange={updateTransportistas}
+              onClose={() => setView(transportistaManagerReturnView.current)}
+            />
+          </>
         )}
 
         {view === "list" && remoteLoading && (
