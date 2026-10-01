@@ -907,6 +907,8 @@ const TRANSPORTISTAS_DELETES_STORAGE_KEY =
   "logiroute_transportistas_pending_deletes_v1";
 const TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY =
   "logiroute_transportistas_pending_sync_v1";
+const TRANSPORTISTAS_SYNC_ENABLED_STORAGE_KEY =
+  "logiroute_transportistas_sync_enabled_v1";
 
 type PendingTransportistaDelete = { id: string; token: number };
 type QueueResult<T> = { ok: true; value: T } | { ok: false; error: Error };
@@ -947,6 +949,16 @@ const loadTransportistaPendingSync = (): boolean => {
   try {
     return (
       localStorage.getItem(TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY) === "true"
+    );
+  } catch {
+    return false;
+  }
+};
+
+const loadTransportistaSyncEnabled = (): boolean => {
+  try {
+    return (
+      localStorage.getItem(TRANSPORTISTAS_SYNC_ENABLED_STORAGE_KEY) === "true"
     );
   } catch {
     return false;
@@ -1151,6 +1163,9 @@ const DeCASection: React.FC = () => {
   >(undefined);
   const companyManagerReturnView = useRef<SectionView>("list");
   const [initialTransportistaLoad] = useState(loadTransportistas);
+  const [initialTransportistaSyncEnabled] = useState(
+    loadTransportistaSyncEnabled,
+  );
   const [transportistas, setTransportistas] = useState<TransportistaHabitual[]>(
     initialTransportistaLoad.items,
   );
@@ -1166,8 +1181,9 @@ const DeCASection: React.FC = () => {
     );
   const [isMigratingTransportistas, setIsMigratingTransportistas] =
     useState(false);
-  const [transportistaSyncEnabled, setTransportistaSyncEnabled] =
-    useState(false);
+  const [transportistaSyncEnabled, setTransportistaSyncEnabled] = useState(
+    initialTransportistaSyncEnabled,
+  );
   const transportistaManagerReturnView = useRef<SectionView>("list");
   const [transportistaQuery, setTransportistaQuery] = useState("");
   const [transportistaPickerOpen, setTransportistaPickerOpen] = useState(false);
@@ -1228,7 +1244,7 @@ const DeCASection: React.FC = () => {
   const pendingTransportistaDeletesRef = useRef(
     loadPendingTransportistaDeletes(),
   );
-  const transportistaSyncEnabledRef = useRef(false);
+  const transportistaSyncEnabledRef = useRef(initialTransportistaSyncEnabled);
   const transportistaMigrationInProgressRef = useRef(false);
   const transportistaSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transportistaRevisionRef = useRef(0);
@@ -1520,16 +1536,31 @@ const DeCASection: React.FC = () => {
           .map(mapSupabaseTransportistaHabitualToLocal)
           .filter((item) => !pendingIds.has(item.id));
         const merged = new Map(remoteItems.map((item) => [item.id, item]));
-        for (const item of transportistasRef.current) merged.set(item.id, item);
+        for (const item of transportistasRef.current) {
+          const remoteItem = merged.get(item.id);
+          if (!remoteItem) {
+            merged.set(item.id, item);
+            continue;
+          }
 
-        const localDefault = transportistasRef.current.find(
-          (item) => item.esPredeterminado,
-        );
-        const defaultId =
-          localDefault?.id ??
-          remoteItems.find((item) => item.esPredeterminado)?.id;
+          const localUpdatedAt = Date.parse(item.updatedAt);
+          const remoteUpdatedAt = Date.parse(remoteItem.updatedAt);
+          const datesAreComparable =
+            Number.isFinite(localUpdatedAt) && Number.isFinite(remoteUpdatedAt);
+
+          if (datesAreComparable && localUpdatedAt !== remoteUpdatedAt) {
+            if (localUpdatedAt > remoteUpdatedAt) {
+              merged.set(item.id, item);
+            }
+          } else if (!transportistaSyncEnabledRef.current) {
+            merged.set(item.id, item);
+          }
+        }
+
+        const mergedItems = [...merged.values()];
+        const defaultId = mergedItems.find((item) => item.esPredeterminado)?.id;
         const normalized = normalizeTransportistaDefaults(
-          [...merged.values()].map((item) => ({
+          mergedItems.map((item) => ({
             ...item,
             esPredeterminado: item.id === defaultId,
           })),
@@ -2093,6 +2124,11 @@ const DeCASection: React.FC = () => {
 
       transportistaSyncEnabledRef.current = true;
       setTransportistaSyncEnabled(true);
+      try {
+        localStorage.setItem(TRANSPORTISTAS_SYNC_ENABLED_STORAGE_KEY, "true");
+      } catch {
+        setTransportistaStorageWarning(true);
+      }
       const changedDuringMigration =
         transportistaRevisionRef.current !== revisionAtStart;
       const stillPending =
