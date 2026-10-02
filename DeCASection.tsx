@@ -1431,14 +1431,13 @@ const DeCASection: React.FC = () => {
           }
         });
 
-        skipNextDecaStorageWriteRef.current = true;
-        setDecas(remoteDecas);
+        if (remoteDecas.length > 0) {
+          setDecas((current) => (current.length === 0 ? remoteDecas : current));
+        }
         setRemoteError(false);
       } catch (error) {
         if (!isCurrent) return;
         console.error("No se pudieron cargar los DeCAs remotos.", error);
-        skipNextDecaStorageWriteRef.current = true;
-        setDecas([]);
         setRemoteError(true);
       } finally {
         if (isCurrent) setRemoteLoading(false);
@@ -2816,12 +2815,11 @@ const DeCASection: React.FC = () => {
             role="status"
           >
             No se han podido cargar tus DeCAs desde el servidor. Tus datos
-            locales se conservan y no se mostrarán automáticamente por
-            seguridad.
+            locales se conservan y siguen visibles en este dispositivo.
           </p>
         )}
 
-        {view === "list" && !remoteLoading && !remoteError && (
+        {view === "list" && !remoteLoading && (
           <>
             <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
               <div>
