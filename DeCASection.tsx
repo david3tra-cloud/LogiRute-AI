@@ -1432,7 +1432,50 @@ const DeCASection: React.FC = () => {
         });
 
         if (remoteDecas.length > 0) {
-          setDecas((current) => (current.length === 0 ? remoteDecas : current));
+          setDecas((current) => {
+            const merged = [...current];
+
+            for (const remoteDeCA of remoteDecas) {
+              const remoteId = remoteDeCA.id;
+              if (!remoteId?.trim()) {
+                merged.push(remoteDeCA);
+                continue;
+              }
+
+              const localIndex = merged.findIndex(
+                (localDeCA) => localDeCA.id === remoteId,
+              );
+              if (localIndex === -1) {
+                merged.push(remoteDeCA);
+                continue;
+              }
+
+              const localDeCA = merged[localIndex];
+              const localUpdatedAt = Date.parse(localDeCA.updatedAt);
+              const remoteUpdatedAt = Date.parse(remoteDeCA.updatedAt);
+              if (
+                Number.isFinite(localUpdatedAt) &&
+                Number.isFinite(remoteUpdatedAt) &&
+                remoteUpdatedAt > localUpdatedAt
+              ) {
+                merged[localIndex] = {
+                  ...localDeCA,
+                  ...remoteDeCA,
+                  fotoAlbaran: localDeCA.fotoAlbaran,
+                  nombreFotoAlbaran: localDeCA.nombreFotoAlbaran,
+                  pesoOBultos: localDeCA.pesoOBultos,
+                  documentoId: localDeCA.documentoId,
+                  pdfGeneradoEn: localDeCA.pdfGeneradoEn,
+                  driveFileId: localDeCA.driveFileId,
+                  driveFileUrl: localDeCA.driveFileUrl,
+                  driveFileNombre: localDeCA.driveFileNombre,
+                  driveSubidoEn: localDeCA.driveSubidoEn,
+                };
+              }
+            }
+
+            return merged;
+          });
         }
         setRemoteError(false);
       } catch (error) {
@@ -2425,10 +2468,24 @@ const DeCASection: React.FC = () => {
             };
             const changes: DecaUpdate = {
               estado: "BORRADOR",
+              fecha: savedForm.fecha.trim() || null,
               cargador: savedForm.cargador.trim() || null,
               destinatario: savedForm.destinatario.trim() || null,
               transportista: savedForm.transportista.trim() || null,
               transportista_nif: savedForm.transportistaNif?.trim() || null,
+              transportista_direccion:
+                savedForm.transportistaDireccion?.trim() || null,
+              transportista_ciudad:
+                savedForm.transportistaCiudad?.trim() || null,
+              transportista_codigo_postal:
+                savedForm.transportistaCodigoPostal?.trim() || null,
+              transportista_provincia:
+                savedForm.transportistaProvincia?.trim() || null,
+              transportista_pais: savedForm.transportistaPais?.trim() || null,
+              transportista_telefono:
+                savedForm.transportistaTelefono?.trim() || null,
+              transportista_email: savedForm.transportistaEmail?.trim() || null,
+              transportista_notas: savedForm.transportistaNotas?.trim() || null,
               mercancia: savedForm.mercancia.trim() || null,
               bultos: toNullableNumber(
                 savedForm.numeroBultos,
@@ -2438,6 +2495,8 @@ const DeCASection: React.FC = () => {
               peso_bruto: toNullableNumber(savedForm.pesoKg, "peso bruto"),
               matricula: savedForm.matriculaVehiculo.trim() || null,
               destino: savedForm.direccionDestino.trim() || null,
+              ciudad_destino: savedForm.ciudadDestino.trim() || null,
+              referencia_albaran: savedForm.referenciaAlbaran.trim() || null,
               observaciones: savedForm.notas.trim() || null,
             };
             await updateUserDeca(supabaseId, changes);

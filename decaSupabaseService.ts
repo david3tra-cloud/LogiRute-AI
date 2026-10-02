@@ -5,18 +5,29 @@ export type DecaRow = {
   id: string;
   user_id: string;
   estado: "BORRADOR" | "EMITIDO";
+  fecha: string | null;
   cargador: string | null;
   cargador_nif: string | null;
   destinatario: string | null;
   destinatario_nif: string | null;
   transportista: string | null;
   transportista_nif: string | null;
+  transportista_direccion: string | null;
+  transportista_ciudad: string | null;
+  transportista_codigo_postal: string | null;
+  transportista_provincia: string | null;
+  transportista_pais: string | null;
+  transportista_telefono: string | null;
+  transportista_email: string | null;
+  transportista_notas: string | null;
   mercancia: string | null;
   bultos: number | null;
   peso_bruto: number | null;
   matricula: string | null;
   origen: string | null;
   destino: string | null;
+  ciudad_destino: string | null;
+  referencia_albaran: string | null;
   observaciones: string | null;
   created_at: string;
   updated_at: string;
@@ -33,22 +44,33 @@ export type DecaUpdate = Partial<
 >;
 
 const DECA_COLUMNS =
-  "id,user_id,estado,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,mercancia,bultos,peso_bruto,matricula,origen,destino,observaciones,created_at,updated_at,emitted_at";
+  "id,user_id,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at";
 
 const UPDATE_COLUMNS = [
   "estado",
+  "fecha",
   "cargador",
   "cargador_nif",
   "destinatario",
   "destinatario_nif",
   "transportista",
   "transportista_nif",
+  "transportista_direccion",
+  "transportista_ciudad",
+  "transportista_codigo_postal",
+  "transportista_provincia",
+  "transportista_pais",
+  "transportista_telefono",
+  "transportista_email",
+  "transportista_notas",
   "mercancia",
   "bultos",
   "peso_bruto",
   "matricula",
   "origen",
   "destino",
+  "ciudad_destino",
+  "referencia_albaran",
   "observaciones",
   "emitted_at",
 ] as const satisfies readonly (keyof DecaUpdate)[];
@@ -129,18 +151,29 @@ export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
   const payload: DecaInsert = {
     user_id: userId,
     estado: "BORRADOR",
+    fecha: nullableText(deca.fecha),
     cargador: nullableText(deca.cargador),
     cargador_nif: null,
     destinatario: nullableText(deca.destinatario),
     destinatario_nif: null,
     transportista: nullableText(deca.transportista),
     transportista_nif: nullableText(deca.transportistaNif),
+    transportista_direccion: nullableText(deca.transportistaDireccion),
+    transportista_ciudad: nullableText(deca.transportistaCiudad),
+    transportista_codigo_postal: nullableText(deca.transportistaCodigoPostal),
+    transportista_provincia: nullableText(deca.transportistaProvincia),
+    transportista_pais: nullableText(deca.transportistaPais),
+    transportista_telefono: nullableText(deca.transportistaTelefono),
+    transportista_email: nullableText(deca.transportistaEmail),
+    transportista_notas: nullableText(deca.transportistaNotas),
     mercancia: nullableText(deca.mercancia),
     bultos: nullableInteger(deca.numeroBultos, "número de bultos"),
     peso_bruto: nullableNumber(deca.pesoKg, "peso bruto"),
     matricula: nullableText(deca.matriculaVehiculo),
     origen: null,
     destino: nullableText(deca.direccionDestino),
+    ciudad_destino: nullableText(deca.ciudadDestino),
+    referencia_albaran: nullableText(deca.referenciaAlbaran),
     observaciones: nullableText(deca.notas),
   };
 
@@ -212,22 +245,29 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
 
   return {
     id: row.id,
-    // La tabla no guarda fecha de transporte; created_at es el único fallback disponible.
-    fecha: row.created_at.slice(0, 10),
+    fecha: row.fecha ?? row.created_at.slice(0, 10),
     cargador: row.cargador ?? "",
     transportista: row.transportista ?? "",
     destinatario: row.destinatario ?? "",
     direccionDestino: row.destino ?? "",
-    ciudadDestino: "",
+    ciudadDestino: row.ciudad_destino ?? "",
     mercancia: row.mercancia ?? "",
     numeroBultos: row.bultos === null ? undefined : String(row.bultos),
     pesoKg: row.peso_bruto === null ? undefined : String(row.peso_bruto),
-    referenciaAlbaran: "",
+    referenciaAlbaran: row.referencia_albaran ?? "",
     matriculaVehiculo: row.matricula ?? "",
     notas: row.observaciones ?? "",
     estado: "borrador",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     transportistaNif: row.transportista_nif ?? undefined,
+    transportistaDireccion: row.transportista_direccion ?? undefined,
+    transportistaCiudad: row.transportista_ciudad ?? undefined,
+    transportistaCodigoPostal: row.transportista_codigo_postal ?? undefined,
+    transportistaProvincia: row.transportista_provincia ?? undefined,
+    transportistaPais: row.transportista_pais ?? undefined,
+    transportistaTelefono: row.transportista_telefono ?? undefined,
+    transportistaEmail: row.transportista_email ?? undefined,
+    transportistaNotas: row.transportista_notas ?? undefined,
   };
 }
