@@ -96,9 +96,16 @@ export interface DeCA {
   referenciaAlbaran: string;
   matriculaVehiculo: string;
   notas: string;
-  estado: "borrador";
+  estado: "borrador" | "BORRADOR" | "EMITIENDO" | "EMITIDO";
   createdAt: string;
   updatedAt: string;
+  emittedAt?: string | null;
+  pdfPath?: string | null;
+  pdfPublicUrl?: string | null;
+  pdfVersion?: number | null;
+  pdfSha256?: string | null;
+  emissionRequestId?: string | null;
+  emissionStartedAt?: string | null;
   fotoAlbaran?: string;
   nombreFotoAlbaran?: string;
   transportistaNif?: string;

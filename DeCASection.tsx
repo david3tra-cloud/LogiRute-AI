@@ -58,6 +58,7 @@ import {
   deleteUserDeca,
   insertUserDeca,
   listUserDecas,
+  mapLocalDecaStatusToSupabase,
   mapSupabaseDecaToLocal,
   updateUserDeca,
   type DecaUpdate,
@@ -2609,7 +2610,7 @@ const DeCASection: React.FC = () => {
               return parsed;
             };
             const changes: DecaUpdate = {
-              estado: "BORRADOR",
+              estado: mapLocalDecaStatusToSupabase(selectedDeCA.estado),
               fecha: savedForm.fecha.trim() || null,
               cargador: savedForm.cargador.trim() || null,
               destinatario: savedForm.destinatario.trim() || null,

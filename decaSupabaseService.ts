@@ -5,7 +5,7 @@ export type DecaRow = {
   id: string;
   user_id: string;
   deleted_at: string | null;
-  estado: "BORRADOR" | "EMITIDO";
+  estado: "BORRADOR" | "EMITIENDO" | "EMITIDO";
   fecha: string | null;
   cargador: string | null;
   cargador_nif: string | null;
@@ -33,19 +33,35 @@ export type DecaRow = {
   created_at: string;
   updated_at: string;
   emitted_at: string | null;
+  pdf_path: string | null;
+  pdf_public_url: string | null;
+  pdf_version: number | null;
+  pdf_sha256: string | null;
+  emission_request_id: string | null;
+  emission_started_at: string | null;
 };
+
+type DecaEmissionMetadata =
+  | "emitted_at"
+  | "pdf_path"
+  | "pdf_public_url"
+  | "pdf_version"
+  | "pdf_sha256"
+  | "emission_request_id"
+  | "emission_started_at";
 
 export type DecaInsert = Omit<
   DecaRow,
-  "id" | "created_at" | "updated_at" | "emitted_at" | "deleted_at"
->;
+  "id" | "created_at" | "updated_at" | "deleted_at" | DecaEmissionMetadata
+> &
+  Partial<Pick<DecaRow, DecaEmissionMetadata>>;
 
 export type DecaUpdate = Partial<
   Omit<DecaRow, "id" | "user_id" | "created_at" | "updated_at">
 >;
 
 const DECA_COLUMNS =
-  "id,user_id,deleted_at,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at";
+  "id,user_id,deleted_at,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
 
 const UPDATE_COLUMNS = [
   "estado",
@@ -74,7 +90,17 @@ const UPDATE_COLUMNS = [
   "referencia_albaran",
   "observaciones",
   "emitted_at",
+  "pdf_path",
+  "pdf_public_url",
+  "pdf_version",
+  "pdf_sha256",
+  "emission_request_id",
+  "emission_started_at",
 ] as const satisfies readonly (keyof DecaUpdate)[];
+
+export const mapLocalDecaStatusToSupabase = (
+  estado: DeCA["estado"],
+): DecaRow["estado"] => (estado === "borrador" ? "BORRADOR" : estado);
 
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -151,7 +177,7 @@ export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
   const userId = await requireCurrentUserId();
   const payload: DecaInsert = {
     user_id: userId,
-    estado: "BORRADOR",
+    estado: mapLocalDecaStatusToSupabase(deca.estado),
     fecha: nullableText(deca.fecha),
     cargador: nullableText(deca.cargador),
     cargador_nif: null,
@@ -234,12 +260,6 @@ export async function deleteUserDeca(
 }
 
 export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
-  if (row.estado !== "BORRADOR") {
-    throw new Error(
-      "No se puede convertir un DeCA EMITIDO: el tipo local DeCA solo admite estado borrador.",
-    );
-  }
-
   return {
     id: row.id,
     fecha: row.fecha ?? row.created_at.slice(0, 10),
@@ -254,9 +274,16 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
     referenciaAlbaran: row.referencia_albaran ?? "",
     matriculaVehiculo: row.matricula ?? "",
     notas: row.observaciones ?? "",
-    estado: "borrador",
+    estado: row.estado === "BORRADOR" ? "borrador" : row.estado,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    emittedAt: row.emitted_at ?? undefined,
+    pdfPath: row.pdf_path ?? undefined,
+    pdfPublicUrl: row.pdf_public_url ?? undefined,
+    pdfVersion: row.pdf_version ?? undefined,
+    pdfSha256: row.pdf_sha256 ?? undefined,
+    emissionRequestId: row.emission_request_id ?? undefined,
+    emissionStartedAt: row.emission_started_at ?? undefined,
     transportistaNif: row.transportista_nif ?? undefined,
     transportistaDireccion: row.transportista_direccion ?? undefined,
     transportistaCiudad: row.transportista_ciudad ?? undefined,
