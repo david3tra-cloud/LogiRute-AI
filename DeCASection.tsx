@@ -979,11 +979,6 @@ const retryPendingDecaDeletes = async (userId: string): Promise<string[]> => {
   for (const reference of readRemoteDecaReferences(
     DECA_PENDING_DELETES_STORAGE_KEY,
   )) {
-    console.log("RETRY DEBUG:", {
-      reference,
-      userId,
-      matches: reference.userId === userId,
-    });
     if (reference.userId !== userId) continue;
 
     try {
@@ -1528,15 +1523,6 @@ const DeCASection: React.FC = () => {
           throw new Error("No hay una sesión autenticada para cargar DeCAs.");
         }
 
-        console.log("LOAD DEBUG:", {
-          userId,
-          remoteDecaUserIdRef: remoteDecaUserIdRef.current,
-          remoteDecaIdsCount: remoteDecaIdsRef.current.size,
-          remoteIdsStored: JSON.parse(
-            localStorage.getItem("transport_app_decas_remote_ids_v1") || "[]",
-          ).length,
-        });
-
         remoteDecaUserIdRef.current = userId;
         remoteDecaIdsRef.current = new Set(
           readRemoteDecaReferences(DECA_REMOTE_IDS_STORAGE_KEY)
@@ -1569,16 +1555,6 @@ const DeCASection: React.FC = () => {
             );
           }
         }
-
-        console.log("ROWS DEBUG:", {
-          totalRows: rows.length,
-          tombstoneCount: tombstoneIds.size,
-          activeRemoteDecas: remoteDecas.length,
-          remoteDecaIdsAfter: remoteDecaIdsRef.current.size,
-          remoteIdsStoredAfter: JSON.parse(
-            localStorage.getItem("transport_app_decas_remote_ids_v1") || "[]",
-          ).length,
-        });
 
         const pendingIds = new Set(
           readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY)
@@ -2761,13 +2737,6 @@ const DeCASection: React.FC = () => {
     const reference = readRemoteDecaReferences(
       DECA_REMOTE_IDS_STORAGE_KEY,
     ).find((item) => item.id === id && item.userId === userId);
-
-    console.log("DELETE DEBUG:", {
-      id: selectedDeCA.id,
-      userId: remoteDecaUserIdRef.current,
-      hasReference: !!reference,
-      isPendingInsert: pendingDecaInsertIdsRef.current.has(selectedDeCA.id),
-    });
 
     if (reference && !enqueuePendingDecaDelete(reference)) {
       alert(
