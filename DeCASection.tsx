@@ -58,9 +58,10 @@ import {
   deleteUserDeca,
   insertUserDeca,
   listUserDecas,
-  mapLocalDecaStatusToSupabase,
   mapSupabaseDecaToLocal,
+  reserveUserDecaEmission,
   updateUserDeca,
+  type DecaRow,
   type DecaUpdate,
 } from "./decaSupabaseService";
 
@@ -72,6 +73,7 @@ type DocumentAction =
   | "uploading"
   | "success"
   | "error";
+type EmissionAction = "idle" | "reserving" | "success" | "error";
 
 type DeCAForm = Pick<
   DeCA,
@@ -1316,6 +1318,8 @@ const DeCASection: React.FC = () => {
   const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
   const [documentAction, setDocumentAction] = useState<DocumentAction>("idle");
   const [documentMessage, setDocumentMessage] = useState("");
+  const [emissionAction, setEmissionAction] = useState<EmissionAction>("idle");
+  const [emissionMessage, setEmissionMessage] = useState("");
   const [view, setView] = useState<SectionView>("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<DeCAForm>(() =>
@@ -1493,6 +1497,8 @@ const DeCASection: React.FC = () => {
   useEffect(() => {
     setDocumentAction("idle");
     setDocumentMessage("");
+    setEmissionAction("idle");
+    setEmissionMessage("");
     if (view === "detail" && isGoogleDriveConfigured()) {
       void loadGoogleIdentityServices().catch(() => undefined);
     }
@@ -1779,6 +1785,81 @@ const DeCASection: React.FC = () => {
   }, [view]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
+  const isSelectedDeCADraft =
+    selectedDeCA?.estado === "borrador" || selectedDeCA?.estado === "BORRADOR";
+
+  const integrateRemoteDeCA = (row: DecaRow) => {
+    const remoteDeCA = mapSupabaseDecaToLocal(row);
+    setDecas((current) => {
+      const index = current.findIndex((deca) => deca.id === row.id);
+      if (index === -1) return [...current, remoteDeCA];
+
+      const localDeCA = current[index];
+      const merged = [...current];
+      merged[index] = {
+        ...localDeCA,
+        ...remoteDeCA,
+        fotoAlbaran: localDeCA.fotoAlbaran,
+        nombreFotoAlbaran: localDeCA.nombreFotoAlbaran,
+        pesoOBultos: localDeCA.pesoOBultos,
+        documentoId: localDeCA.documentoId,
+        pdfGeneradoEn: localDeCA.pdfGeneradoEn,
+        driveFileId: localDeCA.driveFileId,
+        driveFileUrl: localDeCA.driveFileUrl,
+        driveFileNombre: localDeCA.driveFileNombre,
+        driveSubidoEn: localDeCA.driveSubidoEn,
+      };
+      return merged;
+    });
+  };
+
+  const reserveSelectedDeCAEmission = async () => {
+    if (!selectedDeCA || !isSelectedDeCADraft || emissionAction === "reserving")
+      return;
+    if (
+      !window.confirm(
+        "¿Reservar la emisión de este DeCA? El documento pasará a EMITIENDO, pero en esta fase todavía no se generará el PDF final.",
+      )
+    )
+      return;
+
+    setEmissionAction("reserving");
+    setEmissionMessage("");
+    try {
+      const reserved = await reserveUserDecaEmission(selectedDeCA.id);
+      if (reserved) {
+        integrateRemoteDeCA(reserved);
+        setEmissionAction("success");
+        setEmissionMessage(
+          "La reserva se realizó correctamente. El estado del documento ahora es EMITIENDO.",
+        );
+        return;
+      }
+
+      const rows = await listUserDecas();
+      const currentRow = rows.find((row) => row.id === selectedDeCA.id);
+      if (currentRow?.deleted_at === null) {
+        integrateRemoteDeCA(currentRow);
+      } else if (
+        currentRow ||
+        remoteDecaIdsRef.current.has(selectedDeCA.id)
+      ) {
+        setDecas((current) =>
+          current.filter((deca) => deca.id !== selectedDeCA.id),
+        );
+      }
+      setEmissionAction("error");
+      setEmissionMessage(
+        "No se pudo reservar el DeCA. Puede que ya se haya emitido o reservado desde otro dispositivo; se ha consultado la lista remota.",
+      );
+    } catch (error) {
+      console.error("No se pudo reservar la emisión del DeCA.", error);
+      setEmissionAction("error");
+      setEmissionMessage(
+        `No se pudo reservar la emisión del DeCA: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
 
   const persistPdfMetadata = (
     decaId: string,
@@ -2574,6 +2655,10 @@ const DeCASection: React.FC = () => {
     event.preventDefault();
     if (!selectedDeCA && newDecaInsertInProgressRef.current) return;
     if (selectedDeCA && remoteEditInProgressRef.current) return;
+    if (selectedDeCA && !isSelectedDeCADraft) {
+      alert("Este DeCA ya no está en borrador y no se puede editar.");
+      return;
+    }
 
     const now = new Date().toISOString();
     const savedForm = {
@@ -2610,7 +2695,6 @@ const DeCASection: React.FC = () => {
               return parsed;
             };
             const changes: DecaUpdate = {
-              estado: mapLocalDecaStatusToSupabase(selectedDeCA.estado),
               fecha: savedForm.fecha.trim() || null,
               cargador: savedForm.cargador.trim() || null,
               destinatario: savedForm.destinatario.trim() || null,
@@ -2642,7 +2726,23 @@ const DeCASection: React.FC = () => {
               referencia_albaran: savedForm.referenciaAlbaran.trim() || null,
               observaciones: savedForm.notas.trim() || null,
             };
-            await updateUserDeca(supabaseId, changes);
+            const updated = await updateUserDeca(supabaseId, changes);
+            if (updated) {
+              integrateRemoteDeCA(updated);
+            } else {
+              const rows = await listUserDecas();
+              const currentRow = rows.find((row) => row.id === supabaseId);
+              if (currentRow?.deleted_at === null) {
+                integrateRemoteDeCA(currentRow);
+              } else {
+                setDecas((current) =>
+                  current.filter((deca) => deca.id !== supabaseId),
+                );
+              }
+              alert(
+                "No se pudieron guardar los cambios: el DeCA ya no está en borrador o fue eliminado desde otro dispositivo.",
+              );
+            }
           } catch (error) {
             console.error(
               "No se pudo actualizar el DeCA remoto; se conservan los cambios locales.",
@@ -3966,7 +4066,10 @@ const DeCASection: React.FC = () => {
                 <div className="sm:col-span-2 sm:flex sm:justify-end">
                   <button
                     type="submit"
-                    disabled={Boolean(selectedDeCA && isRemoteEditSaving)}
+                    disabled={Boolean(
+                      (selectedDeCA && !isSelectedDeCADraft) ||
+                        (selectedDeCA && isRemoteEditSaving),
+                    )}
                     className="w-full rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 sm:w-auto"
                   >
                     {selectedDeCA && isRemoteEditSaving
@@ -4000,8 +4103,18 @@ const DeCASection: React.FC = () => {
                     {formatDate(selectedDeCA.fecha)}
                   </p>
                 </div>
-                <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
-                  Borrador
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold ${
+                    isSelectedDeCADraft
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-blue-100 text-blue-800"
+                  }`}
+                >
+                  {selectedDeCA.estado === "EMITIENDO"
+                    ? "EMITIENDO"
+                    : selectedDeCA.estado === "EMITIDO"
+                      ? "EMITIDO"
+                      : "Borrador"}
                 </span>
               </div>
               <dl className="grid gap-x-6 sm:grid-cols-2">
@@ -4019,7 +4132,14 @@ const DeCASection: React.FC = () => {
                     selectedDeCA.referenciaAlbaran || "Sin referencia",
                   ],
                   ["Matrícula del vehículo", selectedDeCA.matriculaVehiculo],
-                  ["Estado", "Borrador"],
+                  [
+                    "Estado",
+                    selectedDeCA.estado === "EMITIENDO"
+                      ? "EMITIENDO"
+                      : selectedDeCA.estado === "EMITIDO"
+                        ? "EMITIDO"
+                        : "Borrador",
+                  ],
                 ].map(([label, value]) => (
                   <div key={label} className="border-b border-slate-100 py-3">
                     <dt className="text-xs font-bold text-slate-500">
@@ -4050,6 +4170,18 @@ const DeCASection: React.FC = () => {
                   Documento PDF
                 </h2>
                 <div className="flex flex-wrap gap-2">
+                  {isSelectedDeCADraft && (
+                    <button
+                      type="button"
+                      onClick={reserveSelectedDeCAEmission}
+                      disabled={emissionAction === "reserving"}
+                      className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {emissionAction === "reserving"
+                        ? "Reservando emisión..."
+                        : "Emitir DeCA"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     aria-label="Descargar PDF del DeCA"
@@ -4079,6 +4211,18 @@ const DeCASection: React.FC = () => {
                     Guardar en Google Drive
                   </button>
                 </div>
+                {emissionMessage && (
+                  <p
+                    className={`mt-3 text-sm font-medium ${
+                      emissionAction === "error"
+                        ? "text-red-700"
+                        : "text-emerald-700"
+                    }`}
+                    role={emissionAction === "error" ? "alert" : "status"}
+                  >
+                    {emissionMessage}
+                  </p>
+                )}
                 {!isGoogleDriveConfigured() && (
                   <p className="mt-3 text-sm text-slate-600">
                     Google Drive no está configurado en este entorno.

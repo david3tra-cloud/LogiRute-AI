@@ -64,7 +64,6 @@ const DECA_COLUMNS =
   "id,user_id,deleted_at,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
 
 const UPDATE_COLUMNS = [
-  "estado",
   "fecha",
   "cargador",
   "cargador_nif",
@@ -89,13 +88,6 @@ const UPDATE_COLUMNS = [
   "ciudad_destino",
   "referencia_albaran",
   "observaciones",
-  "emitted_at",
-  "pdf_path",
-  "pdf_public_url",
-  "pdf_version",
-  "pdf_sha256",
-  "emission_request_id",
-  "emission_started_at",
 ] as const satisfies readonly (keyof DecaUpdate)[];
 
 export const mapLocalDecaStatusToSupabase = (
@@ -220,10 +212,10 @@ export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
 export async function updateUserDeca(
   supabaseId: string,
   changes: DecaUpdate,
-): Promise<DecaRow> {
-  await requireCurrentUserId();
+): Promise<DecaRow | null> {
+  const userId = await requireCurrentUserId();
 
-  // Whitelist mutable table columns so user_id and IDs cannot be overridden at runtime.
+  // Only ordinary form fields may be changed through this path.
   const updatePayload: DecaUpdate = {};
   for (const column of UPDATE_COLUMNS) {
     if (Object.hasOwn(changes, column)) {
@@ -235,12 +227,50 @@ export async function updateUserDeca(
     .from("decas")
     .update({ ...updatePayload, updated_at: new Date().toISOString() })
     .eq("id", supabaseId)
+    .eq("user_id", userId)
+    .eq("estado", "BORRADOR")
+    .is("deleted_at", null)
     .select(DECA_COLUMNS)
-    .single()
+    .maybeSingle()
     .returns<DecaRow>();
 
   if (error) {
     return throwSupabaseError("No se pudo actualizar el DeCA", error.message);
+  }
+  return data;
+}
+
+export async function reserveUserDecaEmission(
+  decaId: string,
+): Promise<DecaRow | null> {
+  const userId = await requireCurrentUserId();
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (!randomUUID) {
+    throw new Error(
+      "Este navegador no permite generar un identificador seguro para reservar la emisión.",
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("decas")
+    .update({
+      estado: "EMITIENDO",
+      emission_request_id: randomUUID.call(globalThis.crypto),
+      emission_started_at: new Date().toISOString(),
+    })
+    .eq("id", decaId)
+    .eq("user_id", userId)
+    .eq("estado", "BORRADOR")
+    .is("deleted_at", null)
+    .select(DECA_COLUMNS)
+    .maybeSingle()
+    .returns<DecaRow>();
+
+  if (error) {
+    return throwSupabaseError(
+      "No se pudo reservar la emisión del DeCA",
+      error.message,
+    );
   }
   return data;
 }
