@@ -45,7 +45,10 @@ import {
   DACHSER_SIGNAL_LABELS,
   detectDachserTemplateSignals,
 } from "./decaOcr";
-import { generateDeCAPdf } from "./decaPdfService";
+import {
+  generateDeCAPdf,
+  generateOfficialDeCAPdf,
+} from "./decaPdfService";
 import {
   DriveServiceError,
   isGoogleDriveConfigured,
@@ -55,11 +58,16 @@ import {
 } from "./googleDriveService";
 import {
   getCurrentUserId,
+  calculateBlobSha256,
   deleteUserDeca,
+  finalizeUserDecaEmission,
+  getOfficialDeCAPdfLocation,
+  getUserDecaById,
   insertUserDeca,
   listUserDecas,
   mapSupabaseDecaToLocal,
   reserveUserDecaEmission,
+  uploadOfficialDeCAPdf,
   updateUserDeca,
   type DecaRow,
   type DecaUpdate,
@@ -73,7 +81,12 @@ type DocumentAction =
   | "uploading"
   | "success"
   | "error";
-type EmissionAction = "idle" | "reserving" | "success" | "error";
+type EmissionAction =
+  | "idle"
+  | "reserving"
+  | "finalizing"
+  | "success"
+  | "error";
 
 type DeCAForm = Pick<
   DeCA,
@@ -1204,6 +1217,12 @@ const formatDate = (date: string) => {
       });
 };
 
+const estadoBadgeClasses = (estado: DeCA["estado"]) => {
+  if (estado === "EMITIDO") return "bg-emerald-100 text-emerald-800";
+  if (estado === "EMITIENDO") return "bg-blue-100 text-blue-800";
+  return "bg-amber-100 text-amber-800";
+};
+
 const getDeCAMeasureSummary = (deca: DeCA) => {
   const measures = [
     deca.numeroBultos ? `${deca.numeroBultos} bultos` : "",
@@ -1320,6 +1339,9 @@ const DeCASection: React.FC = () => {
   const [documentMessage, setDocumentMessage] = useState("");
   const [emissionAction, setEmissionAction] = useState<EmissionAction>("idle");
   const [emissionMessage, setEmissionMessage] = useState("");
+  const [emissionRetryIds, setEmissionRetryIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [view, setView] = useState<SectionView>("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<DeCAForm>(() =>
@@ -1818,7 +1840,7 @@ const DeCASection: React.FC = () => {
       return;
     if (
       !window.confirm(
-        "¿Reservar la emisión de este DeCA? El documento pasará a EMITIENDO, pero en esta fase todavía no se generará el PDF final.",
+        "¿Reservar la emisión de este DeCA? El documento pasará a EMITIENDO; después tendrás que finalizar la emisión para subir el PDF oficial.",
       )
     )
       return;
@@ -1857,6 +1879,192 @@ const DeCASection: React.FC = () => {
       setEmissionAction("error");
       setEmissionMessage(
         `No se pudo reservar la emisión del DeCA: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  const finalizeSelectedDeCAEmission = async () => {
+    if (
+      !selectedDeCA ||
+      selectedDeCA.estado !== "EMITIENDO" ||
+      emissionAction === "finalizing"
+    )
+      return;
+
+    const decaId = selectedDeCA.id;
+    setEmissionAction("finalizing");
+    setEmissionMessage("");
+    let reservation:
+      | { emissionRequestId: string; emittedAt: string }
+      | undefined;
+    let location:
+      | Awaited<ReturnType<typeof getOfficialDeCAPdfLocation>>
+      | undefined;
+    let pdfSha256: string | undefined;
+
+    const isConfirmedEmission = (row: DecaRow) =>
+      row.estado === "EMITIDO" &&
+      reservation !== undefined &&
+      location !== undefined &&
+      row.emission_request_id === reservation.emissionRequestId &&
+      row.emitted_at === reservation.emittedAt &&
+      row.pdf_path === location.path &&
+      row.pdf_public_url === location.publicUrl &&
+      typeof row.pdf_sha256 === "string" &&
+      /^[a-f0-9]{64}$/i.test(row.pdf_sha256) &&
+      (pdfSha256 === undefined || row.pdf_sha256 === pdfSha256) &&
+      row.pdf_version === 1;
+
+    try {
+      const remote = await getUserDecaById(decaId);
+      if (!remote) {
+        throw new Error(
+          "No se encontró un DeCA activo en la cuenta remota. No se ha finalizado la emisión.",
+        );
+      }
+      if (remote.estado !== "EMITIENDO") {
+        integrateRemoteDeCA(remote);
+        throw new Error(
+          `El estado remoto cambió a ${remote.estado}; no se intentó finalizar otra emisión.`,
+        );
+      }
+      if (!remote.emission_request_id || !remote.emission_started_at) {
+        throw new Error(
+          "La reserva remota no contiene los datos necesarios para finalizar la emisión.",
+        );
+      }
+      reservation = {
+        emissionRequestId: remote.emission_request_id,
+        emittedAt: remote.emission_started_at,
+      };
+
+      location = await getOfficialDeCAPdfLocation(
+        decaId,
+        reservation.emissionRequestId,
+      );
+      const officialDeCA = mapSupabaseDecaToLocal(remote);
+      const officialPdf = await generateOfficialDeCAPdf(
+        officialDeCA,
+        location.publicUrl,
+        {
+          emittedAt: reservation.emittedAt,
+          documentoId: `DECA-${remote.id}`,
+          cargadorNif: remote.cargador_nif,
+          destinatarioNif: remote.destinatario_nif,
+        },
+      );
+      pdfSha256 = await calculateBlobSha256(officialPdf.blob);
+      const uploadResult = await uploadOfficialDeCAPdf(
+        location,
+        officialPdf.blob,
+      );
+      if (uploadResult.alreadyExists) {
+        pdfSha256 = uploadResult.storedSha256;
+      }
+
+      const finalized = await finalizeUserDecaEmission({
+        decaId,
+        emissionRequestId: reservation.emissionRequestId,
+        emittedAt: reservation.emittedAt,
+        location,
+        pdfSha256,
+      });
+      if (finalized) {
+        integrateRemoteDeCA(finalized);
+        setEmissionRetryIds((current) => {
+          const next = new Set(current);
+          next.delete(decaId);
+          return next;
+        });
+        setEmissionAction("success");
+        setEmissionMessage("El PDF oficial se ha emitido correctamente.");
+        return;
+      }
+
+      throw new Error(
+        "La reserva ya no coincide con la fila remota. Se consultó el estado actual y no se confirmó esta emisión.",
+      );
+    } catch (error) {
+      console.error("No se pudo finalizar la emisión del DeCA.", error);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      let reconciliationMessage: string;
+
+      try {
+        const current = await getUserDecaById(decaId);
+        if (!current) {
+          reconciliationMessage =
+            "No se encontró un DeCA activo en remoto; puede haber sido eliminado.";
+          setEmissionRetryIds((retryIds) => {
+            const next = new Set(retryIds);
+            next.delete(decaId);
+            return next;
+          });
+        } else {
+          integrateRemoteDeCA(current);
+          if (
+            current.estado === "EMITIDO" &&
+            !reservation &&
+            current.emission_request_id &&
+            current.emission_started_at
+          ) {
+            reservation = {
+              emissionRequestId: current.emission_request_id,
+              emittedAt: current.emission_started_at,
+            };
+          }
+          if (
+            reservation &&
+            current.emission_request_id === reservation.emissionRequestId &&
+            !location
+          ) {
+            location = await getOfficialDeCAPdfLocation(
+              decaId,
+              reservation.emissionRequestId,
+            );
+          }
+
+          if (isConfirmedEmission(current)) {
+            setEmissionRetryIds((retryIds) => {
+              const next = new Set(retryIds);
+              next.delete(decaId);
+              return next;
+            });
+            setEmissionAction("success");
+            setEmissionMessage(
+              "La emisión se confirmó al consultar el estado remoto.",
+            );
+            return;
+          }
+
+          if (current.estado === "EMITIENDO") {
+            reconciliationMessage =
+              "El DeCA continúa en EMITIENDO; puedes reintentar la emisión.";
+            setEmissionRetryIds((retryIds) =>
+              new Set(retryIds).add(decaId),
+            );
+          } else {
+            reconciliationMessage =
+              `El estado remoto es ${current.estado}; no se puede reintentar la finalización.`;
+            setEmissionRetryIds((retryIds) => {
+              const next = new Set(retryIds);
+              next.delete(decaId);
+              return next;
+            });
+          }
+        }
+      } catch (reconcileError) {
+        console.error(
+          "No se pudo reconciliar el resultado de la finalización remota.",
+          reconcileError,
+        );
+        reconciliationMessage =
+          `No se pudo consultar el estado remoto: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`;
+        setEmissionRetryIds((retryIds) => new Set(retryIds).add(decaId));
+      }
+      setEmissionAction("error");
+      setEmissionMessage(
+        `No se pudo finalizar la emisión: ${errorMessage} ${reconciliationMessage}`,
       );
     }
   };
@@ -2931,7 +3139,7 @@ const DeCASection: React.FC = () => {
   };
 
   const editSelectedDeCA = () => {
-    if (!selectedDeCA) return;
+    if (!selectedDeCA || !isSelectedDeCADraft) return;
     const next: DeCAForm = {
       fecha: selectedDeCA.fecha ?? getToday(),
       cargador: selectedDeCA.cargador ?? "",
@@ -3195,6 +3403,7 @@ const DeCASection: React.FC = () => {
                   <button
                     key={deca.id}
                     type="button"
+                    data-testid={`deca-row-${deca.id}`}
                     onClick={() => {
                       setSelectedId(deca.id);
                       setView("detail");
@@ -3242,8 +3451,16 @@ const DeCASection: React.FC = () => {
                         </span>
                         {getDeCAMeasureSummary(deca)}
                       </span>
-                      <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold uppercase text-amber-800">
-                        Borrador
+                      <span
+                        className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${estadoBadgeClasses(
+                          deca.estado,
+                        )}`}
+                      >
+                        {deca.estado === "EMITIENDO"
+                          ? "EMITIENDO"
+                          : deca.estado === "EMITIDO"
+                            ? "EMITIDO"
+                            : "Borrador"}
                       </span>
                     </span>
                   </button>
@@ -4104,11 +4321,9 @@ const DeCASection: React.FC = () => {
                   </p>
                 </div>
                 <span
-                  className={`rounded-full px-3 py-1 text-xs font-bold ${
-                    isSelectedDeCADraft
-                      ? "bg-amber-100 text-amber-800"
-                      : "bg-blue-100 text-blue-800"
-                  }`}
+                  className={`rounded-full px-3 py-1 text-xs font-bold ${estadoBadgeClasses(
+                    selectedDeCA.estado,
+                  )}`}
                 >
                   {selectedDeCA.estado === "EMITIENDO"
                     ? "EMITIENDO"
@@ -4182,6 +4397,52 @@ const DeCASection: React.FC = () => {
                         : "Emitir DeCA"}
                     </button>
                   )}
+                  {selectedDeCA.estado === "EMITIENDO" && (
+                    <button
+                      type="button"
+                      onClick={finalizeSelectedDeCAEmission}
+                      disabled={emissionAction === "finalizing"}
+                      className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {emissionAction === "finalizing"
+                        ? "Finalizando emisión..."
+                        : emissionRetryIds.has(selectedDeCA.id)
+                          ? "Reintentar emisión"
+                          : "Finalizar emisión"}
+                    </button>
+                  )}
+                  {selectedDeCA.estado === "EMITIDO" &&
+                    selectedDeCA.pdfPublicUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          try {
+                            const pdfUrl = new URL(selectedDeCA.pdfPublicUrl!);
+                            if (pdfUrl.protocol !== "https:") {
+                              throw new Error("La URL no utiliza HTTPS.");
+                            }
+                            window.open(
+                              pdfUrl.href,
+                              "_blank",
+                              "noopener,noreferrer",
+                            );
+                          } catch (error) {
+                            console.error(
+                              "No se pudo abrir el PDF oficial.",
+                              error,
+                            );
+                            setDocumentAction("error");
+                            setDocumentMessage(
+                              "No se pudo abrir el PDF oficial porque su URL no es válida.",
+                            );
+                          }
+                        }}
+                        className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-emerald-700 bg-white px-4 py-2.5 text-sm font-bold text-emerald-800 transition hover:bg-emerald-50"
+                      >
+                        <ExternalLink size={16} aria-hidden="true" />
+                        Abrir PDF oficial
+                      </button>
+                    )}
                   <button
                     type="button"
                     aria-label="Descargar PDF del DeCA"
@@ -4211,6 +4472,11 @@ const DeCASection: React.FC = () => {
                     Guardar en Google Drive
                   </button>
                 </div>
+                <p className="mt-3 text-xs text-slate-500">
+                  Descargar PDF y Guardar en Google Drive generan copias de
+                  trabajo; solo el PDF emitido y abierto desde su enlace oficial
+                  es el documento oficial.
+                </p>
                 {emissionMessage && (
                   <p
                     className={`mt-3 text-sm font-medium ${
@@ -4343,13 +4609,15 @@ const DeCASection: React.FC = () => {
                 </section>
               )}
               <div className="mt-5 flex justify-end">
-                <button
-                  type="button"
-                  onClick={editSelectedDeCA}
-                  className="mr-2 inline-flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
-                >
-                  Editar DeCA
-                </button>
+                {isSelectedDeCADraft && (
+                  <button
+                    type="button"
+                    onClick={editSelectedDeCA}
+                    className="mr-2 inline-flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Editar DeCA
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleDelete}

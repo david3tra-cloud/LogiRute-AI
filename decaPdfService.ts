@@ -15,6 +15,22 @@ export type DeCAPdfResult = {
   fileName: string;
 };
 
+export type OfficialDeCAPdfValues = {
+  emittedAt: string;
+  documentoId: string;
+  cargadorNif: string | null;
+  destinatarioNif: string | null;
+};
+
+type PdfOverrides = {
+  qrValue?: string;
+  documentoId?: string;
+  pdfGeneradoEn?: string;
+  stableFileId?: string;
+  cargadorNif?: string | null;
+  destinatarioNif?: string | null;
+};
+
 const secureDocumentId = (fecha: string) => {
   const datePart = /^\d{4}-\d{2}-\d{2}$/.test(fecha)
     ? fecha.replaceAll("-", "")
@@ -83,24 +99,47 @@ const createQrSummary = (deca: DeCA, documentoId: string) =>
     `REF:${qrValue(deca.referenciaAlbaran, 24)}`,
   ].join("\n");
 
+const toStablePdfCreationDate = (value: string) => {
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `D:${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(
+    date.getUTCDate(),
+  )}${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(
+    date.getUTCSeconds(),
+  )}+00'00'`;
+};
+
 const makePdf = async (
   deca: DeCA,
   cargador?: EmpresaHabitual,
   destinatario?: EmpresaHabitual,
+  overrides?: PdfOverrides,
 ) => {
-  const documentoId = deca.documentoId || secureDocumentId(deca.fecha);
-  const pdfGeneradoEn = new Date().toISOString();
-  const generatedDate = new Date(pdfGeneradoEn).toLocaleString("es-ES", {
-    dateStyle: "short",
-    timeStyle: "short",
-  });
+  const documentoId =
+    (overrides?.documentoId ?? deca.documentoId) || secureDocumentId(deca.fecha);
+  const pdfGeneradoEn = overrides?.pdfGeneradoEn ?? new Date().toISOString();
+  const generatedDate = overrides?.pdfGeneradoEn
+    ? `${new Date(pdfGeneradoEn).toISOString().replace("T", " ").slice(0, 16)} UTC`
+    : new Date(pdfGeneradoEn).toLocaleString("es-ES", {
+        dateStyle: "short",
+        timeStyle: "short",
+      });
   const fileName = `DECA-${fileDate(deca.fecha)}-${safeFilePart(deca.destinatario)}.pdf`;
-  const qrImage = await QRCode.toDataURL(createQrSummary(deca, documentoId), {
-    errorCorrectionLevel: "M",
-    margin: 1,
-    width: 240,
-  });
+  const qrImage = await QRCode.toDataURL(
+    overrides?.qrValue ?? createQrSummary(deca, documentoId),
+    {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 240,
+    },
+  );
   const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  if (overrides?.pdfGeneradoEn) {
+    pdf.setCreationDate(toStablePdfCreationDate(overrides.pdfGeneradoEn));
+  }
+  if (overrides?.stableFileId) {
+    pdf.setFileId(overrides.stableFileId);
+  }
   let y = 17;
 
   const addPage = () => {
@@ -189,7 +228,10 @@ const makePdf = async (
 
   writeSection("CARGADOR");
   writeRow("Nombre", deca.cargador);
-  writeRow("NIF", cargador?.nif);
+  writeRow(
+    "NIF",
+    overrides ? overrides.cargadorNif ?? undefined : cargador?.nif,
+  );
   writeRow("Dirección", cargador?.direccion);
   writeRow("Código postal", cargador?.codigoPostal);
   writeRow("Ciudad", cargador?.ciudad);
@@ -213,7 +255,10 @@ const makePdf = async (
 
   writeSection("DESTINATARIO");
   writeRow("Nombre", deca.destinatario);
-  writeRow("NIF", destinatario?.nif);
+  writeRow(
+    "NIF",
+    overrides ? overrides.destinatarioNif ?? undefined : destinatario?.nif,
+  );
   writeRow("Dirección", deca.direccionDestino || destinatario?.direccion);
   writeRow("Código postal", destinatario?.codigoPostal);
   writeRow("Ciudad", deca.ciudadDestino || destinatario?.ciudad);
@@ -246,3 +291,48 @@ const makePdf = async (
 };
 
 export const generateDeCAPdf = makePdf;
+
+export const generateOfficialDeCAPdf = async (
+  deca: DeCA,
+  publicPdfUrl: string,
+  values: OfficialDeCAPdfValues,
+): Promise<DeCAPdfResult> => {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(publicPdfUrl);
+  } catch {
+    throw new Error("La URL pública del PDF oficial no es válida.");
+  }
+  if (parsedUrl.protocol !== "https:") {
+    throw new Error("La URL pública del PDF oficial debe usar HTTPS.");
+  }
+  if (!Number.isFinite(Date.parse(values.emittedAt))) {
+    throw new Error("La fecha de emisión estable no es válida.");
+  }
+  if (!values.documentoId.trim()) {
+    throw new Error("El identificador estable del documento está vacío.");
+  }
+  if (!globalThis.crypto?.subtle) {
+    throw new Error(
+      "Este navegador no permite generar un PDF oficial reproducible.",
+    );
+  }
+
+  const fileIdDigest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(deca.id),
+  );
+  const stableFileId = Array.from(new Uint8Array(fileIdDigest).slice(0, 16))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+
+  return makePdf(deca, undefined, undefined, {
+    qrValue: publicPdfUrl,
+    documentoId: values.documentoId,
+    pdfGeneradoEn: values.emittedAt,
+    stableFileId,
+    cargadorNif: values.cargadorNif,
+    destinatarioNif: values.destinatarioNif,
+  });
+};
