@@ -4,6 +4,7 @@ import { supabase } from "./lib/supabase";
 export type DecaRow = {
   id: string;
   user_id: string;
+  deleted_at: string | null;
   estado: "BORRADOR" | "EMITIDO";
   fecha: string | null;
   cargador: string | null;
@@ -36,7 +37,7 @@ export type DecaRow = {
 
 export type DecaInsert = Omit<
   DecaRow,
-  "id" | "created_at" | "updated_at" | "emitted_at"
+  "id" | "created_at" | "updated_at" | "emitted_at" | "deleted_at"
 >;
 
 export type DecaUpdate = Partial<
@@ -44,7 +45,7 @@ export type DecaUpdate = Partial<
 >;
 
 const DECA_COLUMNS =
-  "id,user_id,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at";
+  "id,user_id,deleted_at,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at";
 
 const UPDATE_COLUMNS = [
   "estado",
@@ -222,18 +223,14 @@ export async function deleteUserDeca(
   supabaseId: string,
 ): Promise<{ deleted: boolean }> {
   await requireCurrentUserId();
-  const { data, error } = await supabase
-    .from("decas")
-    .delete()
-    .eq("id", supabaseId)
-    .select("id")
-    .maybeSingle()
-    .returns<{ id: string }>();
+  const { data, error } = await supabase.rpc("soft_delete_deca", {
+    p_deca_id: supabaseId,
+  });
 
   if (error) {
     return throwSupabaseError("No se pudo eliminar el DeCA", error.message);
   }
-  return { deleted: data !== null };
+  return { deleted: data === true };
 }
 
 export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {

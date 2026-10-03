@@ -55,6 +55,7 @@ import {
 } from "./googleDriveService";
 import {
   getCurrentUserId,
+  deleteUserDeca,
   insertUserDeca,
   listUserDecas,
   mapSupabaseDecaToLocal,
@@ -903,12 +904,101 @@ const getToday = () => {
 
 const MATRICULAS_STORAGE_KEY = "logiroute_matriculas_v1";
 const TRANSPORTISTAS_STORAGE_KEY = "logiroute_transportistas_v1";
+const DECA_PENDING_DELETES_STORAGE_KEY =
+  "transport_app_decas_pending_deletes_v1";
+const DECA_REMOTE_IDS_STORAGE_KEY = "transport_app_decas_remote_ids_v1";
 const TRANSPORTISTAS_DELETES_STORAGE_KEY =
   "logiroute_transportistas_pending_deletes_v1";
 const TRANSPORTISTAS_PENDING_SYNC_STORAGE_KEY =
   "logiroute_transportistas_pending_sync_v1";
 const TRANSPORTISTAS_SYNC_ENABLED_STORAGE_KEY =
   "logiroute_transportistas_sync_enabled_v1";
+
+type RemoteDecaReference = { id: string; userId: string };
+
+const isRemoteDecaReference = (value: unknown): value is RemoteDecaReference =>
+  typeof value === "object" &&
+  value !== null &&
+  "id" in value &&
+  typeof value.id === "string" &&
+  "userId" in value &&
+  typeof value.userId === "string";
+
+const readRemoteDecaReferences = (key: string): RemoteDecaReference[] => {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter(isRemoteDecaReference) : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeRemoteDecaReferences = (
+  key: string,
+  references: RemoteDecaReference[],
+): boolean => {
+  try {
+    localStorage.setItem(key, JSON.stringify(references));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const addRemoteDecaReference = (
+  key: string,
+  reference: RemoteDecaReference,
+): boolean => {
+  const references = readRemoteDecaReferences(key);
+  if (
+    references.some(
+      (item) => item.id === reference.id && item.userId === reference.userId,
+    )
+  ) {
+    return true;
+  }
+  return writeRemoteDecaReferences(key, [...references, reference]);
+};
+
+const enqueuePendingDecaDelete = (reference: RemoteDecaReference): boolean =>
+  addRemoteDecaReference(DECA_PENDING_DELETES_STORAGE_KEY, reference);
+
+const removePendingDecaDelete = (reference: RemoteDecaReference) => {
+  const pending = readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY);
+  writeRemoteDecaReferences(
+    DECA_PENDING_DELETES_STORAGE_KEY,
+    pending.filter(
+      (item) => item.id !== reference.id || item.userId !== reference.userId,
+    ),
+  );
+};
+
+const retryPendingDecaDeletes = async (userId: string): Promise<string[]> => {
+  const completedIds: string[] = [];
+
+  for (const reference of readRemoteDecaReferences(
+    DECA_PENDING_DELETES_STORAGE_KEY,
+  )) {
+    console.log("RETRY DEBUG:", {
+      reference,
+      userId,
+      matches: reference.userId === userId,
+    });
+    if (reference.userId !== userId) continue;
+
+    try {
+      const result = await deleteUserDeca(reference.id);
+      if (result.deleted || reference.userId === userId) {
+        removePendingDecaDelete(reference);
+        completedIds.push(reference.id);
+      }
+    } catch {
+      // El tombstone permanece en la cola para otro intento.
+    }
+  }
+
+  return completedIds;
+};
 
 type PendingTransportistaDelete = { id: string; token: number };
 type QueueResult<T> = { ok: true; value: T } | { ok: false; error: Error };
@@ -1076,11 +1166,29 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   notas: "",
 });
 
+const isActiveLocalDeCA = (value: unknown): value is DeCA => {
+  if (!value || typeof value !== "object") return false;
+  return (
+    !("deleted_at" in value) ||
+    value.deleted_at === null ||
+    value.deleted_at === undefined
+  );
+};
+
 const loadDecas = (): DeCA[] => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     const parsed: unknown = saved ? JSON.parse(saved) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const pendingIds = new Set(
+      readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY).map(
+        (item) => item.id,
+      ),
+    );
+    return parsed.filter(
+      (item): item is DeCA =>
+        isActiveLocalDeCA(item) && !pendingIds.has(item.id),
+    );
   } catch {
     return [];
   }
@@ -1257,6 +1365,9 @@ const DeCASection: React.FC = () => {
   const transportistaRemoteLoadVersionRef = useRef(0);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
   const remoteDecaIdsRef = useRef(new Set<string>());
+  const remoteDecaUserIdRef = useRef<string | null>(null);
+  const pendingDecaInsertIdsRef = useRef(new Set<string>());
+  const deletedPendingInsertIdsRef = useRef(new Set<string>());
   const newDecaInsertInProgressRef = useRef(false);
   const remoteEditInProgressRef = useRef(false);
   const skipNextDecaStorageWriteRef = useRef(false);
@@ -1398,7 +1509,10 @@ const DeCASection: React.FC = () => {
       return;
     }
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(decas));
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(decas.filter(isActiveLocalDeCA)),
+      );
     } catch {
       // La sección sigue siendo utilizable aunque el navegador no permita persistir.
     }
@@ -1414,68 +1528,120 @@ const DeCASection: React.FC = () => {
           throw new Error("No hay una sesión autenticada para cargar DeCAs.");
         }
 
+        console.log("LOAD DEBUG:", {
+          userId,
+          remoteDecaUserIdRef: remoteDecaUserIdRef.current,
+          remoteDecaIdsCount: remoteDecaIdsRef.current.size,
+          remoteIdsStored: JSON.parse(
+            localStorage.getItem("transport_app_decas_remote_ids_v1") || "[]",
+          ).length,
+        });
+
+        remoteDecaUserIdRef.current = userId;
+        remoteDecaIdsRef.current = new Set(
+          readRemoteDecaReferences(DECA_REMOTE_IDS_STORAGE_KEY)
+            .filter((item) => item.userId === userId)
+            .map((item) => item.id),
+        );
+
+        await retryPendingDecaDeletes(userId);
         const rows = await listUserDecas();
         if (!isCurrent) return;
 
+        const tombstoneIds = new Set<string>();
         const remoteDecas: DeCA[] = [];
-        rows.forEach((row) => {
+        for (const row of rows) {
+          const reference = { id: row.id, userId: row.user_id };
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, reference);
+          if (row.user_id === userId) remoteDecaIdsRef.current.add(row.id);
+
+          if (row.deleted_at !== null) {
+            tombstoneIds.add(row.id);
+            continue;
+          }
+
           try {
-            const mappedDeCA = mapSupabaseDecaToLocal(row);
-            remoteDecaIdsRef.current.add(mappedDeCA.id);
-            remoteDecas.push(mappedDeCA);
+            remoteDecas.push(mapSupabaseDecaToLocal(row));
           } catch (error) {
             console.error(
               `Se omitió el DeCA remoto ${row.id} porque no se pudo convertir.`,
               error,
             );
           }
+        }
+
+        console.log("ROWS DEBUG:", {
+          totalRows: rows.length,
+          tombstoneCount: tombstoneIds.size,
+          activeRemoteDecas: remoteDecas.length,
+          remoteDecaIdsAfter: remoteDecaIdsRef.current.size,
+          remoteIdsStoredAfter: JSON.parse(
+            localStorage.getItem("transport_app_decas_remote_ids_v1") || "[]",
+          ).length,
         });
 
-        if (remoteDecas.length > 0) {
-          setDecas((current) => {
-            const merged = [...current];
+        const pendingIds = new Set(
+          readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY)
+            .filter((item) => item.userId === userId)
+            .map((item) => item.id),
+        );
 
-            for (const remoteDeCA of remoteDecas) {
-              const remoteId = remoteDeCA.id;
-              if (!remoteId?.trim()) {
-                merged.push(remoteDeCA);
-                continue;
-              }
+        setDecas((current) => {
+          const merged = current.filter(
+            (item) =>
+              isActiveLocalDeCA(item) &&
+              !tombstoneIds.has(item.id) &&
+              !pendingIds.has(item.id),
+          );
 
-              const localIndex = merged.findIndex(
-                (localDeCA) => localDeCA.id === remoteId,
-              );
-              if (localIndex === -1) {
-                merged.push(remoteDeCA);
-                continue;
-              }
-
-              const localDeCA = merged[localIndex];
-              const localUpdatedAt = Date.parse(localDeCA.updatedAt);
-              const remoteUpdatedAt = Date.parse(remoteDeCA.updatedAt);
-              if (
-                Number.isFinite(localUpdatedAt) &&
-                Number.isFinite(remoteUpdatedAt) &&
-                remoteUpdatedAt > localUpdatedAt
-              ) {
-                merged[localIndex] = {
-                  ...localDeCA,
-                  ...remoteDeCA,
-                  fotoAlbaran: localDeCA.fotoAlbaran,
-                  nombreFotoAlbaran: localDeCA.nombreFotoAlbaran,
-                  pesoOBultos: localDeCA.pesoOBultos,
-                  documentoId: localDeCA.documentoId,
-                  pdfGeneradoEn: localDeCA.pdfGeneradoEn,
-                  driveFileId: localDeCA.driveFileId,
-                  driveFileUrl: localDeCA.driveFileUrl,
-                  driveFileNombre: localDeCA.driveFileNombre,
-                  driveSubidoEn: localDeCA.driveSubidoEn,
-                };
-              }
+          for (const remoteDeCA of remoteDecas) {
+            const remoteId = remoteDeCA.id;
+            if (!remoteId?.trim()) {
+              merged.push(remoteDeCA);
+              continue;
             }
 
-            return merged;
-          });
+            const localIndex = merged.findIndex(
+              (localDeCA) => localDeCA.id === remoteId,
+            );
+            if (localIndex === -1) {
+              merged.push(remoteDeCA);
+              continue;
+            }
+
+            const localDeCA = merged[localIndex];
+            const localUpdatedAt = Date.parse(localDeCA.updatedAt);
+            const remoteUpdatedAt = Date.parse(remoteDeCA.updatedAt);
+            if (
+              Number.isFinite(localUpdatedAt) &&
+              Number.isFinite(remoteUpdatedAt) &&
+              remoteUpdatedAt > localUpdatedAt
+            ) {
+              merged[localIndex] = {
+                ...localDeCA,
+                ...remoteDeCA,
+                fotoAlbaran: localDeCA.fotoAlbaran,
+                nombreFotoAlbaran: localDeCA.nombreFotoAlbaran,
+                pesoOBultos: localDeCA.pesoOBultos,
+                documentoId: localDeCA.documentoId,
+                pdfGeneradoEn: localDeCA.pdfGeneradoEn,
+                driveFileId: localDeCA.driveFileId,
+                driveFileUrl: localDeCA.driveFileUrl,
+                driveFileNombre: localDeCA.driveFileNombre,
+                driveSubidoEn: localDeCA.driveSubidoEn,
+              };
+            }
+          }
+
+          return merged;
+        });
+
+        const completedIds = await retryPendingDecaDeletes(userId);
+        if (completedIds.length > 0) {
+          const completed = new Set(completedIds);
+          setDecas((current) =>
+            current.filter((item) => !completed.has(item.id)),
+          );
         }
         setRemoteError(false);
       } catch (error) {
@@ -2525,6 +2691,7 @@ const DeCASection: React.FC = () => {
         updatedAt: now,
       };
       setDecas((current) => [newDeCA, ...current]);
+      pendingDecaInsertIdsRef.current.add(newDeCA.id);
       newDecaInsertInProgressRef.current = true;
       void (async () => {
         try {
@@ -2534,8 +2701,19 @@ const DeCASection: React.FC = () => {
           }
 
           const inserted = await insertUserDeca(newDeCA);
-          remoteDecaIdsRef.current.add(inserted.id);
-          if (mountedRef.current) {
+          const reference = { id: inserted.id, userId: inserted.user_id };
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, reference);
+          if (remoteDecaUserIdRef.current === inserted.user_id) {
+            remoteDecaIdsRef.current.add(inserted.id);
+          }
+
+          if (deletedPendingInsertIdsRef.current.delete(newDeCA.id)) {
+            if (enqueuePendingDecaDelete(reference)) {
+              await retryPendingDecaDeletes(inserted.user_id);
+            } else {
+              await deleteUserDeca(inserted.id);
+            }
+          } else if (mountedRef.current) {
             setDecas((current) =>
               current.map((deca) =>
                 deca.id === newDeCA.id ? { ...deca, id: inserted.id } : deca,
@@ -2548,6 +2726,8 @@ const DeCASection: React.FC = () => {
             `El DeCA se guardó localmente, pero no se pudo guardar en Supabase: ${error instanceof Error ? error.message : String(error)}`,
           );
         } finally {
+          pendingDecaInsertIdsRef.current.delete(newDeCA.id);
+          deletedPendingInsertIdsRef.current.delete(newDeCA.id);
           newDecaInsertInProgressRef.current = false;
         }
       })();
@@ -2569,13 +2749,50 @@ const DeCASection: React.FC = () => {
   };
 
   const handleDelete = () => {
-    if (!selectedDeCA || !window.confirm("¿Eliminar este borrador DeCA?"))
+    if (
+      remoteLoading ||
+      !selectedDeCA ||
+      !window.confirm("¿Eliminar este borrador DeCA?")
+    )
       return;
-    setDecas((current) =>
-      current.filter((deca) => deca.id !== selectedDeCA.id),
-    );
+
+    const id = selectedDeCA.id;
+    const userId = remoteDecaUserIdRef.current;
+    const reference = readRemoteDecaReferences(
+      DECA_REMOTE_IDS_STORAGE_KEY,
+    ).find((item) => item.id === id && item.userId === userId);
+
+    console.log("DELETE DEBUG:", {
+      id: selectedDeCA.id,
+      userId: remoteDecaUserIdRef.current,
+      hasReference: !!reference,
+      isPendingInsert: pendingDecaInsertIdsRef.current.has(selectedDeCA.id),
+    });
+
+    if (reference && !enqueuePendingDecaDelete(reference)) {
+      alert(
+        "No se pudo guardar la baja pendiente; el DeCA no se ha eliminado.",
+      );
+      return;
+    }
+
+    if (!reference && pendingDecaInsertIdsRef.current.has(id)) {
+      deletedPendingInsertIdsRef.current.add(id);
+    }
+
+    setDecas((current) => current.filter((deca) => deca.id !== id));
     setSelectedId(null);
     setView("list");
+
+    if (reference) {
+      void getCurrentUserId()
+        .then((currentUserId) =>
+          currentUserId === reference.userId
+            ? retryPendingDecaDeletes(reference.userId)
+            : undefined,
+        )
+        .catch(() => undefined);
+    }
   };
 
   const startNewDeCA = () => {
