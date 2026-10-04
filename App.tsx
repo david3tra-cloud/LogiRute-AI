@@ -13,6 +13,7 @@ import {
   Map,
   FileText,
   Receipt,
+  Download,
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import MapView from "./MapView";
@@ -48,6 +49,55 @@ const PASSWORD_RECOVERY_PENDING_STORAGE_KEY =
   "logiroute_password_recovery_pending_v1";
 
 type AppModule = "home" | "routes" | "decas" | "billing";
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{
+    outcome: "accepted" | "dismissed";
+    platform: string;
+  }>;
+};
+
+const PWA_INSTALL_DISMISSED_KEY = "logiroute_pwa_install_dismissed_at_v1";
+const PWA_INSTALL_DISMISS_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+
+const getPwaInstallDismissedAt = () => {
+  try {
+    const value = localStorage.getItem(PWA_INSTALL_DISMISSED_KEY);
+    if (value === null) return null;
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  } catch {
+    return null;
+  }
+};
+
+const isPwaInstallDismissedRecently = () => {
+  const dismissedAt = getPwaInstallDismissedAt();
+  const elapsed = dismissedAt === null ? -1 : Date.now() - dismissedAt;
+  return elapsed >= 0 && elapsed < PWA_INSTALL_DISMISS_DURATION_MS;
+};
+
+const detectPwaInstalled = () => {
+  if (typeof window === "undefined") return false;
+  const isStandalone = window.matchMedia?.(
+    "(display-mode: standalone)",
+  ).matches;
+  const isIosStandalone =
+    (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  return Boolean(isStandalone || isIosStandalone);
+};
+
+const isSafariOnIos = () => {
+  if (typeof navigator === "undefined") return false;
+  const userAgent = navigator.userAgent;
+  const isIosDevice =
+    /iPad|iPhone|iPod/i.test(userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isSafari =
+    /Safari/i.test(userAgent) &&
+    !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|YaBrowser)/i.test(userAgent);
+  return isIosDevice && isSafari;
+};
 
 const safeGetItem = (key: string) => {
   if (typeof window === "undefined") return null;
@@ -77,6 +127,17 @@ const App: React.FC = () => {
     hasPasswordRecoveryPending,
   );
   const [activeModule, setActiveModule] = useState<AppModule>("home");
+  const [deferredInstallPrompt, setDeferredInstallPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
+  const [isPwaInstalled, setIsPwaInstalled] = useState(false);
+  const [isInstallDismissedRecently, setIsInstallDismissedRecently] =
+    useState(false);
+  const [isSafariIos, setIsSafariIos] = useState(false);
+  const [isInstallPrompting, setIsInstallPrompting] = useState(false);
+  const [isInstallAccepted, setIsInstallAccepted] = useState(false);
+  const [isInstallPromptDeclined, setIsInstallPromptDeclined] =
+    useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
     const saved = safeGetItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : [];
@@ -158,6 +219,64 @@ const App: React.FC = () => {
     return () => {
       isMounted = false;
       subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateInstalledState = () =>
+      setIsPwaInstalled(detectPwaInstalled());
+    const handleBeforeInstallPrompt = (event: Event) => {
+      const installEvent = event as BeforeInstallPromptEvent;
+      installEvent.preventDefault();
+      if (detectPwaInstalled()) {
+        setIsPwaInstalled(true);
+        return;
+      }
+      if (isPwaInstallDismissedRecently()) {
+        setIsInstallDismissedRecently(true);
+        return;
+      }
+      setIsInstallDismissedRecently(false);
+      setIsInstallAccepted(false);
+      setIsInstallPromptDeclined(false);
+      setInstallError(null);
+      setDeferredInstallPrompt(installEvent);
+    };
+    const handleAppInstalled = () => {
+      setIsPwaInstalled(true);
+      setDeferredInstallPrompt(null);
+      setIsInstallAccepted(false);
+      setIsInstallPromptDeclined(false);
+      setIsInstallDismissedRecently(false);
+      try {
+        localStorage.removeItem(PWA_INSTALL_DISMISSED_KEY);
+      } catch {
+        // El almacenamiento es opcional para ocultar el aviso.
+      }
+    };
+
+    updateInstalledState();
+    setIsSafariIos(isSafariOnIos());
+    setIsInstallDismissedRecently(isPwaInstallDismissedRecently());
+    window.addEventListener(
+      "beforeinstallprompt",
+      handleBeforeInstallPrompt,
+    );
+    window.addEventListener("appinstalled", handleAppInstalled);
+    window.matchMedia("(display-mode: standalone)").addEventListener(
+      "change",
+      updateInstalledState,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "beforeinstallprompt",
+        handleBeforeInstallPrompt,
+      );
+      window.removeEventListener("appinstalled", handleAppInstalled);
+      window
+        .matchMedia("(display-mode: standalone)")
+        .removeEventListener("change", updateInstalledState);
     };
   }, []);
 
@@ -453,6 +572,41 @@ const App: React.FC = () => {
     { id: "billing", label: "Facturación" },
   ];
 
+  const handleDismissInstallPrompt = () => {
+    setIsInstallDismissedRecently(true);
+    setDeferredInstallPrompt(null);
+    try {
+      localStorage.setItem(PWA_INSTALL_DISMISSED_KEY, String(Date.now()));
+    } catch {
+      // Sin almacenamiento disponible, el aviso volverá a aparecer al visitar de nuevo.
+    }
+  };
+
+  const handleInstallPwa = async () => {
+    if (!deferredInstallPrompt || isInstallPrompting) return;
+
+    const installPrompt = deferredInstallPrompt;
+    setIsInstallPrompting(true);
+    setInstallError(null);
+    try {
+      await installPrompt.prompt();
+      const { outcome } = await installPrompt.userChoice;
+      setDeferredInstallPrompt(null);
+      if (outcome === "accepted") {
+        setIsInstallAccepted(true);
+      } else {
+        setIsInstallPromptDeclined(true);
+      }
+    } catch {
+      setDeferredInstallPrompt(null);
+      setInstallError(
+        "No se pudo abrir la instalación. Puedes intentarlo desde el menú del navegador.",
+      );
+    } finally {
+      setIsInstallPrompting(false);
+    }
+  };
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
       <header className="z-50 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 shadow-sm sm:flex-nowrap sm:gap-3 sm:px-6">
@@ -516,6 +670,63 @@ const App: React.FC = () => {
                 Selecciona el área desde la que quieres trabajar.
               </p>
             </div>
+
+            {!isPwaInstalled &&
+              !isInstallDismissedRecently &&
+              !isInstallAccepted &&
+              (deferredInstallPrompt ||
+                isSafariIos ||
+                isInstallPromptDeclined ||
+                installError) && (
+                <aside
+                  aria-labelledby="pwa-install-title"
+                  className="mb-6 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:mb-8 sm:flex-row sm:items-center sm:justify-between sm:p-5"
+                >
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-700">
+                      <Download size={20} aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0">
+                      <h2
+                        id="pwa-install-title"
+                        className="font-black text-slate-900"
+                      >
+                        Instala LogiRute
+                      </h2>
+                      <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                        {isSafariIos
+                          ? "Para instalarla, pulsa Compartir en Safari y selecciona “Añadir a pantalla de inicio”."
+                          : installError ??
+                            (isInstallPromptDeclined
+                              ? "Has pospuesto la instalación. Puedes instalar LogiRute desde el menú del navegador."
+                              : null) ??
+                            "Accede más rápido desde el escritorio o la pantalla de inicio."}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                    {deferredInstallPrompt && (
+                      <button
+                        type="button"
+                        onClick={handleInstallPwa}
+                        disabled={isInstallPrompting}
+                        className="inline-flex min-h-10 items-center justify-center rounded-lg bg-blue-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait disabled:opacity-60"
+                      >
+                        {isInstallPrompting
+                          ? "Abriendo instalación..."
+                          : "Instalar LogiRute"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleDismissInstallPrompt}
+                      className="inline-flex min-h-10 items-center justify-center rounded-lg px-4 py-2 text-sm font-bold text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200"
+                    >
+                      Ahora no
+                    </button>
+                  </div>
+                </aside>
+              )}
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-5">
               {[
