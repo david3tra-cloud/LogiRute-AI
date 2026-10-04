@@ -189,6 +189,36 @@ type DeCAForm = Pick<
 > &
   Pick<DeCA, "fotoAlbaran" | "nombreFotoAlbaran">;
 
+type BulkDeCACommon = Pick<
+  DeCA,
+  | "fecha"
+  | "cargador"
+  | "matriculaVehiculo"
+  | "transportista"
+  | "transportistaNif"
+  | "transportistaDireccion"
+  | "transportistaCiudad"
+  | "transportistaCodigoPostal"
+  | "transportistaProvincia"
+  | "transportistaPais"
+  | "transportistaTelefono"
+  | "transportistaEmail"
+  | "transportistaNotas"
+>;
+type BulkDeCALine = {
+  id: string;
+  destinatario: string;
+  direccionDestino: string;
+  ciudadDestino: string;
+  mercancia: string;
+  numeroBultos: string;
+  pesoKg: string;
+};
+type BulkDeCALineResult = {
+  saved: boolean;
+  error?: string;
+};
+
 type SectionView = "list" | "form" | "detail" | "companies" | "carriers";
 type OCRWorker = {
   recognize: (image: string) => Promise<{ data: { text: string } }>;
@@ -1418,6 +1448,45 @@ const DeCASection: React.FC = () => {
   const [decaCsvImporting, setDecaCsvImporting] = useState(false);
   const decaCsvFileRef = useRef<HTMLInputElement>(null);
   const decaCsvImportInProgressRef = useRef(false);
+  const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
+  const [bulkCommon, setBulkCommon] = useState<BulkDeCACommon>(() => ({
+    fecha: getToday(),
+    cargador: "",
+    matriculaVehiculo: "",
+    transportista: "",
+    transportistaNif: "",
+    transportistaDireccion: "",
+    transportistaCiudad: "",
+    transportistaCodigoPostal: "",
+    transportistaProvincia: "",
+    transportistaPais: "",
+    transportistaTelefono: "",
+    transportistaEmail: "",
+    transportistaNotas: "",
+  }));
+  const [bulkLines, setBulkLines] = useState<BulkDeCALine[]>([
+    {
+      id:
+        globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      destinatario: "",
+      direccionDestino: "",
+      ciudadDestino: "",
+      mercancia: "",
+      numeroBultos: "",
+      pesoKg: "",
+    },
+  ]);
+  const [bulkOpenSuggestion, setBulkOpenSuggestion] = useState<string | null>(
+    null,
+  );
+  const [bulkResults, setBulkResults] = useState<
+    Record<string, BulkDeCALineResult>
+  >({});
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState("");
+  const [bulkError, setBulkError] = useState("");
+  const bulkInProgressRef = useRef(false);
   const [remoteLoading, setRemoteLoading] = useState(true);
   const [remoteError, setRemoteError] = useState(false);
   const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
@@ -3323,6 +3392,312 @@ const DeCASection: React.FC = () => {
   const duplicateCsvRows =
     decaCsvPreview?.rows.filter((row) => row.duplicate) ?? [];
 
+  const bulkCommonErrors: Partial<Record<"fecha" | "cargador", string>> = {};
+  if (!bulkCommon.fecha.trim()) {
+    bulkCommonErrors.fecha = "La fecha es obligatoria.";
+  } else {
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(bulkCommon.fecha);
+    if (dateMatch) {
+      const [, year, month, day] = dateMatch;
+      const parsedDate = new Date(0);
+      parsedDate.setUTCHours(0, 0, 0, 0);
+      parsedDate.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+      if (
+        parsedDate.getUTCFullYear() !== Number(year) ||
+        parsedDate.getUTCMonth() !== Number(month) - 1 ||
+        parsedDate.getUTCDate() !== Number(day)
+      ) {
+        bulkCommonErrors.fecha = "Introduce una fecha válida.";
+      }
+    } else {
+      bulkCommonErrors.fecha = "La fecha debe tener un formato válido.";
+    }
+  }
+  if (!bulkCommon.cargador.trim()) {
+    bulkCommonErrors.cargador = "El cargador es obligatorio.";
+  }
+  if (!normalizePlate(bulkCommon.matriculaVehiculo)) {
+    bulkCommonErrors.matriculaVehiculo =
+      "La matrícula del vehículo es obligatoria.";
+  }
+  const bulkLineErrors = bulkLines.map((line) => {
+    const errors: {
+      destinatario?: string;
+      ciudadDestino?: string;
+      mercancia?: string;
+      numeroBultos?: string;
+      pesoKg?: string;
+    } = {};
+    if (!line.destinatario.trim()) {
+      errors.destinatario = "El destinatario es obligatorio.";
+    }
+    if (!line.ciudadDestino.trim()) {
+      errors.ciudadDestino = "La ciudad de destino es obligatoria.";
+    }
+    if (!line.mercancia.trim()) {
+      errors.mercancia = "La mercancía es obligatoria.";
+    }
+    if (!/^\d+$/.test(line.numeroBultos.trim()) ||
+      !Number.isSafeInteger(Number(line.numeroBultos)) ||
+      Number(line.numeroBultos) < 0
+    ) {
+      errors.numeroBultos = "Introduce un número entero igual o superior a 0.";
+    }
+    const normalizedWeight = line.pesoKg.trim().replace(",", ".");
+    if (
+      !/^\d+(?:\.\d+)?$/.test(normalizedWeight) ||
+      !Number.isFinite(Number(normalizedWeight)) ||
+      Number(normalizedWeight) < 0
+    ) {
+      errors.pesoKg = "Introduce un número igual o superior a 0.";
+    }
+    return errors;
+  });
+  const hasBulkValidationErrors =
+    Object.keys(bulkCommonErrors).length > 0 ||
+    bulkLines.length === 0 ||
+    bulkLineErrors.some((errors) => Object.keys(errors).length > 0);
+  const hasSavedBulkLines = Object.values(bulkResults).some(
+    (result) => result.saved,
+  );
+
+  const selectBulkLoaderCompany = (company: EmpresaHabitual) => {
+    setBulkCommon((current) => ({ ...current, cargador: company.nombre }));
+    setBulkOpenSuggestion(null);
+  };
+
+  const selectBulkDestinationCompany = (
+    lineId: string,
+    company: EmpresaHabitual,
+  ) => {
+    setBulkLines((current) =>
+      current.map((line) =>
+        line.id === lineId
+          ? {
+              ...line,
+              destinatario: company.nombre,
+              direccionDestino: company.direccion,
+              ciudadDestino: company.ciudad,
+            }
+          : line,
+      ),
+    );
+    setBulkOpenSuggestion(null);
+    setBulkResults((current) => {
+      const next = { ...current };
+      delete next[lineId];
+      return next;
+    });
+  };
+
+  const selectBulkTransportista = (item: TransportistaHabitual) => {
+    setBulkCommon((current) => ({
+      ...current,
+      transportista: item.nombre,
+      transportistaNif: item.nif,
+      transportistaDireccion: item.direccion,
+      transportistaCiudad: item.ciudad,
+      transportistaCodigoPostal: item.codigoPostal,
+      transportistaProvincia: item.provincia,
+      transportistaPais: item.pais,
+      transportistaTelefono: item.telefono,
+      transportistaEmail: item.email,
+      transportistaNotas: item.notas,
+    }));
+    setBulkOpenSuggestion(null);
+  };
+
+  const openBulkPanel = () => {
+    if (!hasSavedBulkLines) {
+      const defaultTransportista = transportistas.find(
+        (item) => item.esPredeterminado,
+      );
+      setBulkCommon({
+        fecha: getToday(),
+        cargador: "",
+        matriculaVehiculo: "",
+        transportista: defaultTransportista?.nombre ?? "",
+        transportistaNif: defaultTransportista?.nif ?? "",
+        transportistaDireccion: defaultTransportista?.direccion ?? "",
+        transportistaCiudad: defaultTransportista?.ciudad ?? "",
+        transportistaCodigoPostal: defaultTransportista?.codigoPostal ?? "",
+        transportistaProvincia: defaultTransportista?.provincia ?? "",
+        transportistaPais: defaultTransportista?.pais ?? "",
+        transportistaTelefono: defaultTransportista?.telefono ?? "",
+        transportistaEmail: defaultTransportista?.email ?? "",
+        transportistaNotas: defaultTransportista?.notas ?? "",
+      });
+      setBulkLines([
+        {
+          id:
+            globalThis.crypto?.randomUUID?.() ??
+            `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          destinatario: "",
+          direccionDestino: "",
+          ciudadDestino: "",
+          mercancia: "",
+          numeroBultos: "",
+          pesoKg: "",
+        },
+      ]);
+      setBulkOpenSuggestion(null);
+      setBulkResults({});
+      setBulkMessage("");
+      setBulkError("");
+    }
+    setBulkPanelOpen(true);
+  };
+
+  const confirmBulkDecas = async () => {
+    if (
+      hasBulkValidationErrors ||
+      bulkInProgressRef.current ||
+      bulkLines.length === 0
+    ) {
+      return;
+    }
+
+    bulkInProgressRef.current = true;
+    setBulkSaving(true);
+    setBulkMessage("");
+    setBulkError("");
+
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        setBulkError(
+          "Tu sesión no es válida o ha caducado. Inicia sesión de nuevo antes de crear DeCAs.",
+        );
+        return;
+      }
+
+      const nextResults = { ...bulkResults };
+      const insertedDecas: DeCA[] = [];
+      for (const [index, line] of bulkLines.entries()) {
+        if (nextResults[line.id]?.saved) continue;
+        const now = new Date().toISOString();
+        const deca: DeCA = {
+          id:
+            globalThis.crypto?.randomUUID?.() ??
+            `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+          fecha: bulkCommon.fecha.trim(),
+          cargador: bulkCommon.cargador.trim(),
+          matriculaVehiculo: normalizePlate(bulkCommon.matriculaVehiculo),
+          transportista: bulkCommon.transportista.trim(),
+          transportistaNif: bulkCommon.transportistaNif,
+          transportistaDireccion: bulkCommon.transportistaDireccion,
+          transportistaCiudad: bulkCommon.transportistaCiudad,
+          transportistaCodigoPostal: bulkCommon.transportistaCodigoPostal,
+          transportistaProvincia: bulkCommon.transportistaProvincia,
+          transportistaPais: bulkCommon.transportistaPais,
+          transportistaTelefono: bulkCommon.transportistaTelefono,
+          transportistaEmail: bulkCommon.transportistaEmail,
+          transportistaNotas: bulkCommon.transportistaNotas,
+          destinatario: line.destinatario.trim(),
+          direccionDestino: line.direccionDestino,
+          ciudadDestino: line.ciudadDestino.trim(),
+          mercancia: line.mercancia.trim(),
+          numeroBultos: line.numeroBultos.trim(),
+          pesoKg: line.pesoKg.trim().replace(",", "."),
+          referenciaAlbaran: "",
+          notas: "",
+          estado: "borrador",
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        try {
+          const inserted = await insertUserDeca(deca);
+          const reference = { id: inserted.id, userId: inserted.user_id };
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, reference);
+          if (remoteDecaUserIdRef.current === inserted.user_id) {
+            remoteDecaIdsRef.current.add(inserted.id);
+          }
+          insertedDecas.push(mapSupabaseDecaToLocal(inserted));
+          nextResults[line.id] = { saved: true };
+        } catch (error) {
+          nextResults[line.id] = {
+            saved: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Error desconocido al guardar el DeCA.",
+          };
+        }
+      }
+      setBulkResults(nextResults);
+
+      let refreshError = "";
+      try {
+        const refreshedRows = await listUserDecas();
+        const refreshedDecas: DeCA[] = [];
+        for (const row of refreshedRows) {
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, {
+            id: row.id,
+            userId: row.user_id,
+          });
+          if (row.user_id === userId) remoteDecaIdsRef.current.add(row.id);
+          if (row.deleted_at === null) {
+            refreshedDecas.push(mapSupabaseDecaToLocal(row));
+          }
+        }
+        const refreshedIds = new Set(refreshedDecas.map((deca) => deca.id));
+        for (const deca of insertedDecas) {
+          if (!refreshedIds.has(deca.id)) refreshedDecas.push(deca);
+        }
+        setDecas((current) => [
+          ...refreshedDecas,
+          ...current.filter((deca) => !refreshedIds.has(deca.id)),
+        ]);
+      } catch (error) {
+        console.error("No se pudo recargar la lista de DeCAs masivos.", error);
+        refreshError =
+          " No se pudo actualizar la lista desde Supabase; las filas confirmadas se muestran localmente.";
+        if (insertedDecas.length > 0) {
+          const insertedIds = new Set(insertedDecas.map((deca) => deca.id));
+          setDecas((current) => [
+            ...insertedDecas.filter(
+              (deca) => !current.some((item) => item.id === deca.id),
+            ),
+            ...current.filter((deca) => !insertedIds.has(deca.id)),
+          ]);
+        }
+      }
+
+      const savedCount = Object.values(nextResults).filter(
+        (result) => result.saved,
+      ).length;
+      const failedLines = bulkLines.flatMap((line, index) =>
+        nextResults[line.id]?.saved
+          ? []
+          : [
+              `Línea ${index + 1}: ${
+                nextResults[line.id]?.error ??
+                "No se pudo guardar este DeCA."
+              }`,
+            ],
+      );
+      if (failedLines.length === 0) {
+        setBulkMessage(
+          `${savedCount} DeCAs creados y sincronizados correctamente.${refreshError}`,
+        );
+        setBulkPanelOpen(false);
+      } else {
+        setBulkError(
+          `${savedCount} DeCAs creados y sincronizados; ${failedLines.length} no se pudieron guardar.${refreshError}\n${failedLines.join("\n")}\nLas líneas ya confirmadas no se reenviarán al reintentar.`,
+        );
+      }
+    } catch (error) {
+      console.error("No se pudo confirmar la creación masiva de DeCAs.", error);
+      setBulkError(
+        `No se pudo validar la sesión o completar la creación. Inicia sesión de nuevo e inténtalo otra vez.${error instanceof Error ? ` ${error.message}` : ""}`,
+      );
+    } finally {
+      bulkInProgressRef.current = false;
+      setBulkSaving(false);
+    }
+  };
+
   const confirmDecaCsvImport = async () => {
     if (
       !decaCsvPreview ||
@@ -3649,6 +4024,7 @@ const DeCASection: React.FC = () => {
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
+                  disabled={bulkSaving}
                   onClick={() => {
                     setDecaCsvPanelOpen(true);
                     setDecaCsvPreview(null);
@@ -3662,6 +4038,15 @@ const DeCASection: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  disabled={bulkSaving}
+                  onClick={openBulkPanel}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-bold text-blue-800 shadow-sm transition hover:bg-blue-100"
+                >
+                  <Plus size={17} /> DeCA masivo
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkSaving}
                   onClick={startNewDeCA}
                   className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800"
                 >
@@ -3685,6 +4070,635 @@ const DeCASection: React.FC = () => {
               >
                 {decaCsvImportError}
               </p>
+            )}
+            {bulkMessage && (
+              <p
+                role="status"
+                className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800"
+              >
+                {bulkMessage}
+              </p>
+            )}
+            {bulkError && !bulkPanelOpen && (
+              <p
+                role="alert"
+                className="mb-4 whitespace-pre-line rounded-lg bg-red-50 p-3 text-sm text-red-800"
+              >
+                {bulkError}
+              </p>
+            )}
+
+            {bulkPanelOpen && (
+              <section
+                aria-labelledby="bulk-deca-title"
+                className="mb-5 space-y-4 rounded-lg border border-blue-200 bg-white p-4"
+              >
+                <div>
+                  <h2
+                    id="bulk-deca-title"
+                    className="font-bold text-slate-900"
+                  >
+                    Crear DeCAs en bloque
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Los datos comunes se aplicarán a cada línea. Cada línea
+                    válida se guardará como un DeCA borrador independiente.
+                  </p>
+                </div>
+
+                <fieldset
+                  disabled={bulkSaving || hasSavedBulkLines}
+                  className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+                >
+                  <div>
+                    <label className={labelClass} htmlFor="bulk-deca-date">
+                      Fecha
+                    </label>
+                    <input
+                      id="bulk-deca-date"
+                      className={inputClass}
+                      type="date"
+                      value={bulkCommon.fecha}
+                      onChange={(event) =>
+                        setBulkCommon((current) => ({
+                          ...current,
+                          fecha: event.target.value,
+                        }))
+                      }
+                      aria-invalid={Boolean(bulkCommonErrors.fecha)}
+                      aria-describedby={
+                        bulkCommonErrors.fecha
+                          ? "bulk-deca-date-error"
+                          : undefined
+                      }
+                    />
+                    {bulkCommonErrors.fecha && (
+                      <p
+                        id="bulk-deca-date-error"
+                        className="mt-1 text-xs text-red-700"
+                        role="alert"
+                      >
+                        {bulkCommonErrors.fecha}
+                      </p>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <label className={labelClass} htmlFor="bulk-deca-loader">
+                      Cargador
+                    </label>
+                    <input
+                      id="bulk-deca-loader"
+                      className={inputClass}
+                      value={bulkCommon.cargador}
+                      onFocus={() => setBulkOpenSuggestion("loader")}
+                      onChange={(event) => {
+                        setBulkCommon((current) => ({
+                          ...current,
+                          cargador: event.target.value,
+                        }));
+                        setBulkOpenSuggestion("loader");
+                      }}
+                      placeholder="Buscar empresa o escribir cargador"
+                      aria-label="Cargador común"
+                      aria-autocomplete="list"
+                      aria-expanded={
+                        bulkOpenSuggestion === "loader" &&
+                        Boolean(bulkCommon.cargador.trim()) &&
+                        matchingCompanies(bulkCommon.cargador).length > 0
+                      }
+                      aria-controls="bulk-deca-loader-options"
+                      aria-invalid={Boolean(bulkCommonErrors.cargador)}
+                      aria-describedby={
+                        bulkCommonErrors.cargador
+                          ? "bulk-deca-loader-error"
+                          : undefined
+                      }
+                    />
+                    {bulkCommonErrors.cargador && (
+                      <p
+                        id="bulk-deca-loader-error"
+                        className="mt-1 text-xs text-red-700"
+                        role="alert"
+                      >
+                        {bulkCommonErrors.cargador}
+                      </p>
+                    )}
+                    {bulkOpenSuggestion === "loader" &&
+                      bulkCommon.cargador.trim() &&
+                      matchingCompanies(bulkCommon.cargador).length > 0 && (
+                        <ul
+                          id="bulk-deca-loader-options"
+                          className="absolute inset-x-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg"
+                          role="listbox"
+                          aria-label="Empresas habituales para el cargador"
+                        >
+                          {matchingCompanies(bulkCommon.cargador)
+                            .slice(0, 10)
+                            .map((company) => (
+                              <li key={company.id}>
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={false}
+                                  onClick={() =>
+                                    selectBulkLoaderCompany(company)
+                                  }
+                                  className="w-full border-b border-slate-100 px-3 py-2.5 text-left hover:bg-blue-50"
+                                >
+                                  <span className="block text-sm font-bold text-slate-800">
+                                    {company.nombre}
+                                  </span>
+                                  <span className="block text-xs text-slate-500">
+                                    {[
+                                      company.direccion,
+                                      company.codigoPostal,
+                                      company.ciudad,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(", ")}
+                                    {company.nif
+                                      ? ` · NIF ${company.nif}`
+                                      : ""}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                  </div>
+                  <div className="relative">
+                    <label className={labelClass} htmlFor="bulk-deca-carrier">
+                      Transportista habitual (opcional)
+                    </label>
+                    <input
+                      id="bulk-deca-carrier"
+                      className={inputClass}
+                      value={bulkCommon.transportista}
+                      onFocus={() => setBulkOpenSuggestion("carrier")}
+                      onChange={(event) => {
+                        setBulkCommon((current) => ({
+                          ...current,
+                          transportista: event.target.value,
+                          transportistaNif: "",
+                          transportistaDireccion: "",
+                          transportistaCiudad: "",
+                          transportistaCodigoPostal: "",
+                          transportistaProvincia: "",
+                          transportistaPais: "",
+                          transportistaTelefono: "",
+                          transportistaEmail: "",
+                          transportistaNotas: "",
+                        }));
+                        setBulkOpenSuggestion("carrier");
+                      }}
+                      placeholder="Buscar transportista o escribir manualmente"
+                      aria-label="Transportista común, opcional"
+                      aria-autocomplete="list"
+                      aria-expanded={
+                        bulkOpenSuggestion === "carrier" &&
+                        Boolean(bulkCommon.transportista.trim()) &&
+                        matchingTransportistas(bulkCommon.transportista)
+                          .length > 0
+                      }
+                      aria-controls="bulk-deca-carrier-options"
+                    />
+                    {bulkOpenSuggestion === "carrier" &&
+                      bulkCommon.transportista.trim() &&
+                      matchingTransportistas(bulkCommon.transportista).length >
+                        0 && (
+                        <ul
+                          id="bulk-deca-carrier-options"
+                          className="absolute inset-x-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg"
+                          role="listbox"
+                          aria-label="Transportistas habituales"
+                        >
+                          {matchingTransportistas(bulkCommon.transportista)
+                            .slice(0, 10)
+                            .map((item) => (
+                              <li key={item.id}>
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={false}
+                                  onClick={() =>
+                                    selectBulkTransportista(item)
+                                  }
+                                  className="w-full border-b border-slate-100 px-3 py-2.5 text-left hover:bg-blue-50"
+                                >
+                                  <span className="block text-sm font-bold text-slate-800">
+                                    {item.nombre}
+                                    {item.esPredeterminado
+                                      ? " · Predeterminado"
+                                      : ""}
+                                  </span>
+                                  <span className="block text-xs text-slate-500">
+                                    {[item.nif, item.direccion, item.ciudad]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    {bulkOpenSuggestion === "carrier" &&
+                      bulkCommon.transportista.trim() &&
+                      matchingTransportistas(bulkCommon.transportista)
+                        .length === 0 &&
+                      transportistas.length > 0 && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          No hay coincidencias. Puedes introducirlo
+                          manualmente.
+                        </p>
+                      )}
+                  </div>
+                  <div>
+                    <label
+                      className={labelClass}
+                      htmlFor="bulk-deca-plate"
+                    >
+                      Matrícula
+                    </label>
+                    <input
+                      id="bulk-deca-plate"
+                      className={inputClass}
+                      list="bulk-deca-matriculas-habituales"
+                      value={bulkCommon.matriculaVehiculo}
+                      onChange={(event) =>
+                        setBulkCommon((current) => ({
+                          ...current,
+                          matriculaVehiculo: event.target.value,
+                        }))
+                      }
+                      aria-invalid={Boolean(
+                        bulkCommonErrors.matriculaVehiculo,
+                      )}
+                      aria-describedby={
+                        bulkCommonErrors.matriculaVehiculo
+                          ? "bulk-deca-plate-error"
+                          : undefined
+                      }
+                    />
+                    <datalist id="bulk-deca-matriculas-habituales">
+                      {plates.map((plate) => (
+                        <option key={plate.id} value={plate.valor} />
+                      ))}
+                    </datalist>
+                    {bulkCommonErrors.matriculaVehiculo && (
+                      <p
+                        id="bulk-deca-plate-error"
+                        className="mt-1 text-xs text-red-700"
+                        role="alert"
+                      >
+                        {bulkCommonErrors.matriculaVehiculo}
+                      </p>
+                    )}
+                  </div>
+                </fieldset>
+
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold text-slate-800">Líneas</h3>
+                  {bulkLines.map((line, index) => {
+                    const lineResult = bulkResults[line.id];
+                    const lineErrors = bulkLineErrors[index];
+                    const fieldsDisabled = bulkSaving || hasSavedBulkLines;
+                    const destinationSuggestionKey = `destination-${line.id}`;
+                    const matchingLineCompanies = matchingCompanies(
+                      line.destinatario,
+                    );
+                    const updateLine = (changes: Partial<BulkDeCALine>) => {
+                      setBulkLines((current) =>
+                        current.map((item) =>
+                          item.id === line.id ? { ...item, ...changes } : item,
+                        ),
+                      );
+                      setBulkResults((current) => {
+                        const next = { ...current };
+                        delete next[line.id];
+                        return next;
+                      });
+                    };
+                    return (
+                      <fieldset
+                        key={line.id}
+                        disabled={fieldsDisabled}
+                        className="grid min-w-0 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-3"
+                      >
+                        <legend className="px-1 text-xs font-bold text-slate-600">
+                          Línea {index + 1}
+                        </legend>
+                        <div className="relative min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-recipient`}
+                          >
+                            Destinatario
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-recipient`}
+                            className={inputClass}
+                            value={line.destinatario}
+                            onFocus={() =>
+                              setBulkOpenSuggestion(destinationSuggestionKey)
+                            }
+                            onChange={(event) => {
+                              updateLine({ destinatario: event.target.value });
+                              setBulkOpenSuggestion(destinationSuggestionKey);
+                            }}
+                            placeholder="Buscar empresa o escribir destinatario"
+                            aria-label={`Destinatario de la línea ${index + 1}`}
+                            aria-autocomplete="list"
+                            aria-expanded={
+                              bulkOpenSuggestion === destinationSuggestionKey &&
+                              Boolean(line.destinatario.trim()) &&
+                              matchingLineCompanies.length > 0
+                            }
+                            aria-controls={`bulk-deca-${line.id}-recipient-options`}
+                            aria-invalid={Boolean(lineErrors.destinatario)}
+                            aria-describedby={
+                              lineErrors.destinatario
+                                ? `bulk-deca-${line.id}-recipient-error`
+                                : undefined
+                            }
+                          />
+                          {lineErrors.destinatario && (
+                            <p
+                              id={`bulk-deca-${line.id}-recipient-error`}
+                              className="mt-1 text-xs text-red-700"
+                              role="alert"
+                            >
+                              {lineErrors.destinatario}
+                            </p>
+                          )}
+                          {bulkOpenSuggestion === destinationSuggestionKey &&
+                            line.destinatario.trim() &&
+                            matchingLineCompanies.length > 0 && (
+                              <ul
+                                id={`bulk-deca-${line.id}-recipient-options`}
+                                className="absolute inset-x-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg"
+                                role="listbox"
+                                aria-label={`Empresas habituales para el destinatario de la línea ${index + 1}`}
+                              >
+                                {matchingLineCompanies
+                                  .slice(0, 10)
+                                  .map((company) => (
+                                    <li key={company.id}>
+                                      <button
+                                        type="button"
+                                        role="option"
+                                        aria-selected={false}
+                                        onClick={() =>
+                                          selectBulkDestinationCompany(
+                                            line.id,
+                                            company,
+                                          )
+                                        }
+                                        className="w-full border-b border-slate-100 px-3 py-2.5 text-left hover:bg-blue-50"
+                                      >
+                                        <span className="block text-sm font-bold text-slate-800">
+                                          {company.nombre}
+                                        </span>
+                                        <span className="block text-xs text-slate-500">
+                                          {[
+                                            company.direccion,
+                                            company.codigoPostal,
+                                            company.ciudad,
+                                          ]
+                                            .filter(Boolean)
+                                            .join(", ")}
+                                          {company.nif
+                                            ? ` · NIF ${company.nif}`
+                                            : ""}
+                                        </span>
+                                      </button>
+                                    </li>
+                                  ))}
+                              </ul>
+                            )}
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-city`}
+                          >
+                            Ciudad de destino
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-city`}
+                            className={inputClass}
+                            value={line.ciudadDestino}
+                            onChange={(event) =>
+                              updateLine({ ciudadDestino: event.target.value })
+                            }
+                            aria-invalid={Boolean(lineErrors.ciudadDestino)}
+                            aria-describedby={
+                              lineErrors.ciudadDestino
+                                ? `bulk-deca-${line.id}-city-error`
+                                : undefined
+                            }
+                          />
+                          {lineErrors.ciudadDestino && (
+                            <p
+                              id={`bulk-deca-${line.id}-city-error`}
+                              className="mt-1 text-xs text-red-700"
+                              role="alert"
+                            >
+                              {lineErrors.ciudadDestino}
+                            </p>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-goods`}
+                          >
+                            Mercancía
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-goods`}
+                            className={inputClass}
+                            value={line.mercancia}
+                            onChange={(event) =>
+                              updateLine({ mercancia: event.target.value })
+                            }
+                            aria-invalid={Boolean(lineErrors.mercancia)}
+                            aria-describedby={
+                              lineErrors.mercancia
+                                ? `bulk-deca-${line.id}-goods-error`
+                                : undefined
+                            }
+                          />
+                          {lineErrors.mercancia && (
+                            <p
+                              id={`bulk-deca-${line.id}-goods-error`}
+                              className="mt-1 text-xs text-red-700"
+                              role="alert"
+                            >
+                              {lineErrors.mercancia}
+                            </p>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-packages`}
+                          >
+                            Bultos
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-packages`}
+                            className={inputClass}
+                            inputMode="numeric"
+                            value={line.numeroBultos}
+                            onChange={(event) =>
+                              updateLine({ numeroBultos: event.target.value })
+                            }
+                            aria-invalid={Boolean(lineErrors.numeroBultos)}
+                            aria-describedby={
+                              lineErrors.numeroBultos
+                                ? `bulk-deca-${line.id}-packages-error`
+                                : undefined
+                            }
+                          />
+                          {lineErrors.numeroBultos && (
+                            <p
+                              id={`bulk-deca-${line.id}-packages-error`}
+                              className="mt-1 text-xs text-red-700"
+                              role="alert"
+                            >
+                              {lineErrors.numeroBultos}
+                            </p>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-weight`}
+                          >
+                            Peso (kg)
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-weight`}
+                            className={inputClass}
+                            inputMode="decimal"
+                            value={line.pesoKg}
+                            onChange={(event) =>
+                              updateLine({ pesoKg: event.target.value })
+                            }
+                            aria-invalid={Boolean(lineErrors.pesoKg)}
+                            aria-describedby={
+                              lineErrors.pesoKg
+                                ? `bulk-deca-${line.id}-weight-error`
+                                : undefined
+                            }
+                          />
+                          {lineErrors.pesoKg && (
+                            <p
+                              id={`bulk-deca-${line.id}-weight-error`}
+                              className="mt-1 text-xs text-red-700"
+                              role="alert"
+                            >
+                              {lineErrors.pesoKg}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                          {lineResult?.saved && (
+                            <span className="text-xs font-semibold text-emerald-700">
+                              Guardado
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={
+                              fieldsDisabled ||
+                              bulkLines.length === 1 ||
+                              lineResult?.saved
+                            }
+                            onClick={() => {
+                              setBulkLines((current) =>
+                                current.filter((item) => item.id !== line.id),
+                              );
+                              setBulkResults((current) => {
+                                const next = { ...current };
+                                delete next[line.id];
+                                return next;
+                              });
+                            }}
+                            className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Eliminar línea
+                          </button>
+                        </div>
+                        {lineResult?.error && (
+                          <p
+                            className="text-xs text-red-700 sm:col-span-2 lg:col-span-3"
+                            role="alert"
+                          >
+                            No se pudo guardar esta línea: {lineResult.error}
+                          </p>
+                        )}
+                      </fieldset>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    disabled={bulkSaving || hasSavedBulkLines}
+                    onClick={() =>
+                      setBulkLines((current) => [
+                        ...current,
+                        {
+                          id:
+                            globalThis.crypto?.randomUUID?.() ??
+                            `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                          destinatario: "",
+                          direccionDestino: "",
+                          ciudadDestino: "",
+                          mercancia: "",
+                          numeroBultos: "",
+                          pesoKg: "",
+                        },
+                      ])
+                    }
+                    className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    <Plus aria-hidden="true" className="mr-1 inline" size={16} />
+                    Añadir línea
+                  </button>
+                </div>
+
+                {bulkError && (
+                  <p
+                    className="whitespace-pre-line rounded-lg bg-red-50 p-3 text-sm text-red-800"
+                    role="alert"
+                  >
+                    {bulkError}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={bulkSaving}
+                    onClick={() => setBulkPanelOpen(false)}
+                    className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={bulkSaving || hasBulkValidationErrors}
+                    onClick={confirmBulkDecas}
+                    className="min-h-10 rounded-lg bg-blue-700 px-3 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {bulkSaving
+                      ? "Guardando DeCAs..."
+                      : hasSavedBulkLines
+                        ? "Reintentar líneas fallidas"
+                        : "Crear DeCAs"}
+                  </button>
+                </div>
+              </section>
             )}
 
             {decaCsvPanelOpen && (
