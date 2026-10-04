@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import QRCode from "qrcode";
 import {
   insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
@@ -74,6 +75,75 @@ import {
 } from "./decaSupabaseService";
 
 const STORAGE_KEY = "transport_app_decas";
+
+const isValidHttpsPdfUrl = (
+  value: string | null | undefined,
+): value is string => {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const OfficialPdfQr = ({ url }: { url: string }) => {
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [generationFailed, setGenerationFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setQrDataUrl(null);
+    setGenerationFailed(false);
+
+    QRCode.toDataURL(url, {
+      width: 200,
+      margin: 2,
+      errorCorrectionLevel: "M",
+    }).then(
+      (dataUrl) => {
+        if (!cancelled) setQrDataUrl(dataUrl);
+      },
+      () => {
+        if (!cancelled) setGenerationFailed(true);
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return (
+    <aside className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 text-center shadow-sm">
+      <p className="mb-2 text-xs font-bold text-slate-800">
+        QR del PDF oficial
+      </p>
+      {qrDataUrl ? (
+        <img
+          src={qrDataUrl}
+          alt="QR para abrir el PDF oficial del DeCA"
+          className="mx-auto h-auto w-full max-w-[200px]"
+        />
+      ) : generationFailed ? (
+        <p className="py-4 text-xs text-slate-500">
+          No se pudo generar el QR.
+        </p>
+      ) : (
+        <p className="py-4 text-xs text-slate-500">Generando QR…</p>
+      )}
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-2 inline-block text-sm font-semibold text-blue-700 underline hover:text-blue-900"
+      >
+        Abrir PDF oficial
+      </a>
+    </aside>
+  );
+};
+
 type DocumentAction =
   | "idle"
   | "generating"
@@ -1332,6 +1402,7 @@ const DeCASection: React.FC = () => {
   const [plateEditValue, setPlateEditValue] = useState("");
   const [plateManagerMessage, setPlateManagerMessage] = useState("");
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
+  const [qrOpenDeCA, setQrOpenDeCA] = useState<DeCA | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(true);
   const [remoteError, setRemoteError] = useState(false);
   const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
@@ -3422,70 +3493,84 @@ const DeCASection: React.FC = () => {
             ) : (
               <div className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
                 {decas.map((deca) => (
-                  <button
+                  <div
                     key={deca.id}
-                    type="button"
-                    data-testid={`deca-row-${deca.id}`}
-                    onClick={() => {
-                      setSelectedId(deca.id);
-                      setView("detail");
-                    }}
-                    className="grid w-full gap-3 px-4 py-4 text-left transition hover:bg-blue-50/50 sm:grid-cols-[0.8fr_2fr_1fr_1.2fr_auto] sm:items-center sm:px-5"
+                    className="grid min-w-0 gap-3 px-4 py-4 sm:px-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                   >
-                    <span className="text-sm font-semibold text-slate-700">
-                      {formatDate(deca.fecha)}
-                    </span>
-                    <span className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
-                      <span className="min-w-0">
+                    <button
+                      type="button"
+                      data-testid={`deca-row-${deca.id}`}
+                      onClick={() => {
+                        setSelectedId(deca.id);
+                        setView("detail");
+                      }}
+                      className="grid w-full min-w-0 gap-3 text-left transition hover:bg-blue-50/50 sm:grid-cols-[0.8fr_2fr_1fr_1.2fr_auto] sm:items-center"
+                    >
+                      <span className="text-sm font-semibold text-slate-700">
+                        {formatDate(deca.fecha)}
+                      </span>
+                      <span className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+                        <span className="min-w-0">
+                          <span className="block text-[10px] font-bold uppercase text-slate-500">
+                            Cargador
+                          </span>
+                          <span className="block truncate text-sm font-bold text-slate-900">
+                            {deca.cargador?.trim() || "Cargador no indicado"}
+                          </span>
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-[10px] font-bold uppercase text-slate-500">
+                            Destinatario
+                          </span>
+                          <span className="block truncate text-sm font-bold text-slate-900">
+                            {deca.destinatario?.trim() ||
+                              "Destinatario no indicado"}
+                          </span>
+                        </span>
+                      </span>
+                      <span className="text-sm text-slate-600">
                         <span className="block text-[10px] font-bold uppercase text-slate-500">
-                          Cargador
+                          Ciudad de destino
                         </span>
-                        <span className="block truncate text-sm font-bold text-slate-900">
-                          {deca.cargador?.trim() || "Cargador no indicado"}
-                        </span>
+                        {deca.ciudadDestino || "Sin ciudad"}
                       </span>
-                      <span className="min-w-0">
+                      <span className="min-w-0 truncate text-sm text-slate-600">
                         <span className="block text-[10px] font-bold uppercase text-slate-500">
-                          Destinatario
+                          Mercancía
                         </span>
-                        <span className="block truncate text-sm font-bold text-slate-900">
-                          {deca.destinatario?.trim() ||
-                            "Destinatario no indicado"}
+                        {deca.mercancia || "Sin mercancía"}
+                      </span>
+                      <span className="flex items-center justify-between gap-3 sm:justify-end">
+                        <span className="text-xs text-slate-500">
+                          <span className="block text-[10px] font-bold uppercase text-slate-500">
+                            Bultos / peso
+                          </span>
+                          {getDeCAMeasureSummary(deca)}
+                        </span>
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${estadoBadgeClasses(
+                            deca.estado,
+                          )}`}
+                        >
+                          {deca.estado === "EMITIENDO"
+                            ? "EMITIENDO"
+                            : deca.estado === "EMITIDO"
+                              ? "EMITIDO"
+                              : "Borrador"}
                         </span>
                       </span>
-                    </span>
-                    <span className="text-sm text-slate-600">
-                      <span className="block text-[10px] font-bold uppercase text-slate-500">
-                        Ciudad de destino
-                      </span>
-                      {deca.ciudadDestino || "Sin ciudad"}
-                    </span>
-                    <span className="min-w-0 truncate text-sm text-slate-600">
-                      <span className="block text-[10px] font-bold uppercase text-slate-500">
-                        Mercancía
-                      </span>
-                      {deca.mercancia || "Sin mercancía"}
-                    </span>
-                    <span className="flex items-center justify-between gap-3 sm:justify-end">
-                      <span className="text-xs text-slate-500">
-                        <span className="block text-[10px] font-bold uppercase text-slate-500">
-                          Bultos / peso
-                        </span>
-                        {getDeCAMeasureSummary(deca)}
-                      </span>
-                      <span
-                        className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${estadoBadgeClasses(
-                          deca.estado,
-                        )}`}
-                      >
-                        {deca.estado === "EMITIENDO"
-                          ? "EMITIENDO"
-                          : deca.estado === "EMITIDO"
-                            ? "EMITIDO"
-                            : "Borrador"}
-                      </span>
-                    </span>
-                  </button>
+                    </button>
+                    {deca.estado === "EMITIDO" &&
+                      isValidHttpsPdfUrl(deca.pdfPublicUrl) && (
+                        <button
+                          type="button"
+                          onClick={() => setQrOpenDeCA(deca)}
+                          className="justify-self-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:justify-self-auto"
+                        >
+                          Ver QR
+                        </button>
+                      )}
+                  </div>
                 ))}
               </div>
             )}
@@ -4651,6 +4736,43 @@ const DeCASection: React.FC = () => {
             </div>
           </div>
         )}
+
+        {qrOpenDeCA &&
+          isValidHttpsPdfUrl(qrOpenDeCA.pdfPublicUrl) && (
+            <div
+              className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6"
+              role="presentation"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  setQrOpenDeCA(null);
+                }
+              }}
+            >
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="official-pdf-qr-title"
+                className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-2xl sm:p-6"
+              >
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2
+                    id="official-pdf-qr-title"
+                    className="text-lg font-black text-slate-900"
+                  >
+                    QR del PDF oficial
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setQrOpenDeCA(null)}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+                <OfficialPdfQr url={qrOpenDeCA.pdfPublicUrl} />
+              </section>
+            </div>
+          )}
 
         {plateManagerOpen && (
           <div
