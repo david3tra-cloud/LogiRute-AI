@@ -314,7 +314,8 @@ const syncForUser = async (
       continue;
     }
     try {
-      await deleteForUser(userId, localId);
+      const deleted = await deleteForUser(userId, localId);
+      if (!deleted) continue;
       deleteResult.confirmedDeletedLocalIds.push(localId);
       const index = localId.startsWith(REMOTE_ROW_PREFIX)
         ? rows.findIndex(
