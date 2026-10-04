@@ -1,9 +1,35 @@
-﻿਍‣潌獧਍潬獧਍⸪潬൧渊浰搭扥杵氮杯പ礊牡⵮敤畢⹧潬⩧਍慹湲攭牲牯氮杯പ瀊灮⵭敤畢⹧潬⩧਍敬湲ⵡ敤畢⹧潬⩧਍਍潮敤浟摯汵獥਍楤瑳਍楤瑳猭牳਍⸪潬慣൬⸊湥⹶潬慣൬ഊ⌊䔠楤潴⁲楤敲瑣牯敩⁳湡⁤楦敬൳⸊獶潣敤⨯਍⸡獶潣敤支瑸湥楳湯⹳獪湯਍椮敤ൡ⸊卄卟潴敲਍⸪畳൯⨊渮癴⩳਍⸪橮灳潲൪⨊献湬਍⸪睳⸿攀渀瘀⸀氀漀挀愀氀ഀ਀⸀攀渀瘀⸀氀漀挀愀氀ഀ਀਀攮癮氮捯污਍猊灵扡獡⽥琮浥⽰਍⸊潣瑮湩敵യ
+﻿# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
 node_modules
+dist/
+dist-ssr/
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 .continue/
 .env.local
 .gitignore.backup
-dist/
 
 supabase/.temp/
+
+# Local secret files
+.env
+.env.*
+!.env.example
