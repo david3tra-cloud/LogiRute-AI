@@ -10,6 +10,9 @@ import {
   LogOut,
   Phone,
   Tag,
+  Map,
+  FileText,
+  Receipt,
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import MapView from "./MapView";
@@ -44,6 +47,8 @@ const SEQUENCE_KEY = "logiroute_sequence_v1";
 const PASSWORD_RECOVERY_PENDING_STORAGE_KEY =
   "logiroute_password_recovery_pending_v1";
 
+type AppModule = "home" | "routes" | "decas" | "billing";
+
 const safeGetItem = (key: string) => {
   if (typeof window === "undefined") return null;
   try {
@@ -71,9 +76,7 @@ const App: React.FC = () => {
   const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(
     hasPasswordRecoveryPending,
   );
-  const [activeModule, setActiveModule] = useState<
-    "routes" | "decas" | "billing"
-  >("decas");
+  const [activeModule, setActiveModule] = useState<AppModule>("home");
   const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
     const saved = safeGetItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : [];
@@ -443,6 +446,13 @@ const App: React.FC = () => {
     setManualSequence(newSequence);
   };
 
+  const navigationModules: { id: AppModule; label: string }[] = [
+    { id: "home", label: "Inicio" },
+    { id: "routes", label: "Rutas" },
+    { id: "decas", label: "DeCAs" },
+    { id: "billing", label: "Facturación" },
+  ];
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
       <header className="z-50 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 shadow-sm sm:flex-nowrap sm:gap-3 sm:px-6">
@@ -456,19 +466,13 @@ const App: React.FC = () => {
           aria-label="Secciones principales"
           className="order-3 flex w-full shrink-0 items-center justify-center gap-1 rounded-xl bg-slate-100 p-1 sm:order-none sm:w-auto"
         >
-          {[
-            { id: "routes", label: "Rutas" },
-            { id: "decas", label: "DeCAs" },
-            { id: "billing", label: "Facturación" },
-          ].map((module) => (
+          {navigationModules.map((module) => (
             <button
               key={module.id}
               type="button"
               aria-current={activeModule === module.id ? "page" : undefined}
-              onClick={() =>
-                setActiveModule(module.id as "routes" | "decas" | "billing")
-              }
-              className={`rounded-lg px-2.5 py-2 text-[10px] font-black transition sm:px-4 sm:text-xs ${
+              onClick={() => setActiveModule(module.id)}
+              className={`rounded-lg px-2 py-2 text-[10px] font-black transition sm:px-4 sm:text-xs ${
                 activeModule === module.id
                   ? "bg-white text-blue-700 shadow-sm"
                   : "text-slate-500 hover:text-slate-800"
@@ -478,15 +482,97 @@ const App: React.FC = () => {
             </button>
           ))}
         </nav>
-        <button
-          type="button"
-          onClick={handleSignOut}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-2 text-[10px] font-bold text-slate-600 transition hover:bg-slate-100 sm:text-xs"
-        >
-          <LogOut size={15} />
-          Cerrar sesión
-        </button>
+        <div className="ml-auto flex min-w-0 max-w-[55%] items-center justify-end gap-2 sm:max-w-[40%] sm:gap-3">
+          <span
+            className="min-w-0 truncate text-right text-[10px] font-semibold text-slate-600 sm:text-xs"
+            title={user?.email ? `Sesión: ${user.email}` : "Sesión iniciada"}
+          >
+            {user?.email ? `Sesión: ${user.email}` : "Sesión iniciada"}
+          </span>
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-2 text-[10px] font-bold text-slate-600 transition hover:bg-slate-100 sm:text-xs"
+          >
+            <LogOut size={15} />
+            Cerrar sesión
+          </button>
+        </div>
       </header>
+
+      <section
+        className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "home" ? "block" : "hidden"}`}
+      >
+        <main className="min-h-full bg-slate-100 px-4 py-8 sm:px-8 sm:py-12">
+          <div className="mx-auto w-full max-w-6xl">
+            <div className="mb-8 sm:mb-10">
+              <p className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-blue-700">
+                LOGIROUTE AI
+              </p>
+              <h1 className="text-2xl font-black tracking-tight text-slate-900 sm:text-4xl">
+                Bienvenido a LogiRute
+              </h1>
+              <p className="mt-2 text-sm text-slate-600 sm:text-base">
+                Selecciona el área desde la que quieres trabajar.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-5">
+              {[
+                {
+                  id: "routes",
+                  title: "Rutas",
+                  description:
+                    "Planifica y controla las paradas de la jornada.",
+                  icon: Map,
+                  accent: "border-t-blue-500 text-blue-700 bg-blue-50",
+                },
+                {
+                  id: "decas",
+                  title: "DeCAs",
+                  description:
+                    "Crea, importa, emite y consulta documentos de transporte.",
+                  icon: FileText,
+                  accent: "border-t-indigo-500 text-indigo-700 bg-indigo-50",
+                },
+                {
+                  id: "billing",
+                  title: "Facturación",
+                  description:
+                    "Gestiona la facturación y documentación económica.",
+                  icon: Receipt,
+                  accent: "border-t-emerald-500 text-emerald-700 bg-emerald-50",
+                },
+              ].map((card) => {
+                const Icon = card.icon;
+                return (
+                  <button
+                    key={card.id}
+                    type="button"
+                    onClick={() => setActiveModule(card.id as AppModule)}
+                    className="group flex min-h-52 w-full flex-col rounded-2xl border border-slate-200 border-t-4 bg-white p-5 text-left shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-md focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 sm:min-h-56 sm:p-6"
+                  >
+                    <span
+                      className={`mb-5 inline-flex h-12 w-12 items-center justify-center rounded-xl ${card.accent}`}
+                    >
+                      <Icon size={24} strokeWidth={2.2} />
+                    </span>
+                    <span className="text-lg font-black text-slate-900 sm:text-xl">
+                      {card.title}
+                    </span>
+                    <span className="mt-2 text-sm leading-relaxed text-slate-600">
+                      {card.description}
+                    </span>
+                    <span className="mt-auto pt-5 text-xs font-bold text-slate-500 transition group-hover:text-slate-800">
+                      Abrir área
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </main>
+      </section>
 
       <div
         className={`min-h-0 flex-1 ${activeModule === "routes" ? "block" : "hidden"}`}
