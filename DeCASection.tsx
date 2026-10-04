@@ -25,7 +25,7 @@ import {
 import DestinatariosManager from "./DestinatariosManager";
 import TransportistasManager from "./TransportistasManager";
 import {
-  listUserTransportistasHabituales,
+  loadUserTransportistasWithTombstones,
   mapSupabaseTransportistaHabitualToLocal,
   migrateUserTransportistasHabituales,
   syncUserTransportistasHabituales,
@@ -1415,6 +1415,22 @@ const DeCASection: React.FC = () => {
     }
   };
 
+  const reconcileRemoteTransportistaDeletes = (
+    deletedLocalIds: string[],
+  ) => {
+    if (deletedLocalIds.length === 0) return;
+    const deletedIds = new Set(deletedLocalIds);
+    const activeItems = transportistasRef.current.filter(
+      (item) => !deletedIds.has(item.id),
+    );
+    transportistasRef.current = activeItems;
+    setTransportistas(activeItems);
+    persistTransportistasLocally(
+      activeItems,
+      pendingTransportistaDeletesRef.current,
+    );
+  };
+
   const persistTransportistaPendingSync = (pending: boolean) => {
     try {
       localStorage.setItem(
@@ -1488,6 +1504,9 @@ const DeCASection: React.FC = () => {
           !transportistasRef.current.some((item) => item.id === localId),
       );
       acknowledgeTransportistaDeletes(attempted, deleteResult);
+      reconcileRemoteTransportistaDeletes(
+        deleteResult.remoteDeletedLocalIds,
+      );
       if (deleteResult.failedDeletes.length > 0) {
         throw new Error(
           `Fallaron ${deleteResult.failedDeletes.length} borrados remotos.`,
@@ -1737,11 +1756,13 @@ const DeCASection: React.FC = () => {
 
     const loadRemoteTransportistas = async () => {
       try {
-        const rows = await listUserTransportistasHabituales();
+        const { activeRows: rows, deletedLocalIds } =
+          await loadUserTransportistasWithTombstones();
         if (!active || version !== transportistaRemoteLoadVersionRef.current) {
           return;
         }
 
+        reconcileRemoteTransportistaDeletes(deletedLocalIds);
         const pendingIds = new Set(
           pendingTransportistaDeletesRef.current.map((item) => item.id),
         );
@@ -2563,6 +2584,7 @@ const DeCASection: React.FC = () => {
           !transportistasRef.current.some((item) => item.id === localId),
       );
       acknowledgeTransportistaDeletes(attempted, result);
+      reconcileRemoteTransportistaDeletes(result.remoteDeletedLocalIds);
       if (result.failedDeletes.length > 0) {
         throw new Error(
           `Fallaron ${result.failedDeletes.length} borrados durante la migración.`,
