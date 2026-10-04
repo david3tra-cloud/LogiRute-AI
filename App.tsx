@@ -42,6 +42,8 @@ const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
 const SEQUENCE_KEY = "logiroute_sequence_v1";
 const DECAS_STORAGE_KEY = "transport_app_decas";
+const PASSWORD_RECOVERY_PENDING_STORAGE_KEY =
+  "logiroute_password_recovery_pending_v1";
 
 const safeGetItem = (key: string) => {
   if (typeof window === "undefined") return null;
@@ -52,9 +54,24 @@ const safeGetItem = (key: string) => {
   }
 };
 
+const hasPasswordRecoveryPending = () => {
+  try {
+    return (
+      window.sessionStorage.getItem(
+        PASSWORD_RECOVERY_PENDING_STORAGE_KEY,
+      ) === "1"
+    );
+  } catch {
+    return false;
+  }
+};
+
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(
+    hasPasswordRecoveryPending,
+  );
   const [activeModule, setActiveModule] = useState<
     "routes" | "decas" | "billing"
   >("decas");
@@ -125,7 +142,13 @@ const App: React.FC = () => {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecoveryPending(true);
+      }
+      if (event === "SIGNED_OUT") {
+        setPasswordRecoveryPending(false);
+      }
       setUser(session?.user ?? null);
       setIsAuthLoading(false);
     });
@@ -381,7 +404,7 @@ const App: React.FC = () => {
     );
   }
 
-  if (!user) return <Auth />;
+  if (!user || passwordRecoveryPending) return <Auth />;
 
   if (isAppClosed) {
     return (
