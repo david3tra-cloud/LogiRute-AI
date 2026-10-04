@@ -41,7 +41,6 @@ import {
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
 const SEQUENCE_KEY = "logiroute_sequence_v1";
-const DECAS_STORAGE_KEY = "transport_app_decas";
 const PASSWORD_RECOVERY_PENDING_STORAGE_KEY =
   "logiroute_password_recovery_pending_v1";
 
@@ -312,12 +311,22 @@ const App: React.FC = () => {
     if (window.confirm("¿BORRAR Y CERRAR? Se eliminarán todas las paradas.")) {
       setIsAppClosed(true);
       try {
-        const savedDecas = localStorage.getItem(DECAS_STORAGE_KEY);
-        localStorage.clear();
-        if (savedDecas !== null) {
-          localStorage.setItem(DECAS_STORAGE_KEY, savedDecas);
-        }
-        sessionStorage.clear();
+        [
+          STORAGE_KEY,
+          VIEW_MODE_KEY,
+          SEQUENCE_KEY,
+          "logiroute_empresas_v1",
+          "logiroute_destinatarios_v1",
+          "logiroute_matriculas_v1",
+          "logiroute_transportistas_v1",
+          "transport_app_decas_pending_deletes_v1",
+          "transport_app_decas_remote_ids_v1",
+          "logiroute_transportistas_pending_deletes_v1",
+          "logiroute_transportistas_pending_sync_v1",
+          "logiroute_transportistas_sync_enabled_v1",
+          "logiroute_address_cache_v1",
+        ].forEach((key) => localStorage.removeItem(key));
+        sessionStorage.removeItem(PASSWORD_RECOVERY_PENDING_STORAGE_KEY);
       } catch {
         // ignorar
       }
