@@ -164,7 +164,7 @@ export const loadEmpresas = (): EmpresaLoadResult => {
   }
 };
 
-const parseCsvRows = (content: string) => {
+export const parseCsvRows = (content: string) => {
   const text = content.replace(/^\uFEFF/, "");
   const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
   const countOutsideQuotes = (line: string, delimiter: string) => {
@@ -218,7 +218,7 @@ const parseCsvRows = (content: string) => {
   return rows;
 };
 
-const normalizeHeader = (value: string) =>
+export const normalizeCsvHeader = (value: string) =>
   value
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -231,10 +231,10 @@ const normalizeHeader = (value: string) =>
 const getHeaderMap = (header: string[]) => {
   const mapping = new Map<number, (typeof CSV_HEADERS)[number]>();
   header.forEach((value, index) => {
-    const normalized = normalizeHeader(value);
+    const normalized = normalizeCsvHeader(value);
     for (const canonical of CSV_HEADERS) {
       const aliases = [canonical, ...HEADER_ALIASES[canonical]];
-      if (aliases.some((alias) => normalizeHeader(alias) === normalized)) {
+      if (aliases.some((alias) => normalizeCsvHeader(alias) === normalized)) {
         mapping.set(index, canonical);
         break;
       }

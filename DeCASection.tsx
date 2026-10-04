@@ -39,6 +39,11 @@ import {
   recipientDuplicateKey,
 } from "./destinatariosService";
 import {
+  decaTemplateCsv,
+  previewDecasCsv,
+  type DecaCsvPreview,
+} from "./decaCsvService";
+import {
   getImageDimensions,
   recognizeDachserRegions,
   type DachserRegionTexts,
@@ -1403,6 +1408,13 @@ const DeCASection: React.FC = () => {
   const [plateManagerMessage, setPlateManagerMessage] = useState("");
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
   const [qrOpenDeCA, setQrOpenDeCA] = useState<DeCA | null>(null);
+  const [decaCsvPanelOpen, setDecaCsvPanelOpen] = useState(false);
+  const [decaCsvPreview, setDecaCsvPreview] = useState<DecaCsvPreview | null>(
+    null,
+  );
+  const [decaCsvReadError, setDecaCsvReadError] = useState("");
+  const [decaCsvImportMessage, setDecaCsvImportMessage] = useState("");
+  const decaCsvFileRef = useRef<HTMLInputElement>(null);
   const [remoteLoading, setRemoteLoading] = useState(true);
   const [remoteError, setRemoteError] = useState(false);
   const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
@@ -3271,6 +3283,62 @@ const DeCASection: React.FC = () => {
     setView("form");
   };
 
+  const handleDecaCsvFile = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    setDecaCsvImportMessage("");
+    setDecaCsvReadError("");
+    if (!file) return;
+
+    try {
+      setDecaCsvPreview(previewDecasCsv(await file.text(), decas));
+    } catch {
+      setDecaCsvPreview(null);
+      setDecaCsvReadError("No se pudo leer el archivo CSV.");
+    }
+  };
+
+  const downloadDecaCsvTemplate = () => {
+    const url = URL.createObjectURL(
+      new Blob([decaTemplateCsv()], { type: "text/csv;charset=utf-8" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "plantilla-decas-logiroute.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const validCsvDecas =
+    decaCsvPreview?.rows.flatMap((row) =>
+      row.deca && !row.reason ? [row.deca] : [],
+    ) ?? [];
+  const invalidCsvRows =
+    decaCsvPreview?.rows.filter((row) => row.reason && !row.duplicate) ?? [];
+  const duplicateCsvRows =
+    decaCsvPreview?.rows.filter((row) => row.duplicate) ?? [];
+
+  const confirmDecaCsvImport = () => {
+    if (
+      !decaCsvPreview ||
+      decaCsvPreview.headerError ||
+      validCsvDecas.length === 0
+    ) {
+      return;
+    }
+
+    setDecas((current) => [...validCsvDecas, ...current]);
+    const omitted = decaCsvPreview.detectedRows - validCsvDecas.length;
+    setDecaCsvImportMessage(
+      `${validCsvDecas.length} DeCAs importados correctamente, ${omitted} con errores.`,
+    );
+    setDecaCsvPanelOpen(false);
+    setDecaCsvPreview(null);
+    setDecaCsvReadError("");
+  };
+
   const inputClass =
     "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-100";
   const labelClass = "mb-1.5 block text-xs font-bold text-slate-600";
@@ -3477,14 +3545,186 @@ const DeCASection: React.FC = () => {
                   Documentos de control de transporte
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={startNewDeCA}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800"
-              >
-                <Plus size={17} /> Nuevo DeCA
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDecaCsvPanelOpen(true);
+                    setDecaCsvPreview(null);
+                    setDecaCsvReadError("");
+                    setDecaCsvImportMessage("");
+                  }}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  <Upload size={17} /> Importar desde CSV
+                </button>
+                <button
+                  type="button"
+                  onClick={startNewDeCA}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800"
+                >
+                  <Plus size={17} /> Nuevo DeCA
+                </button>
+              </div>
             </div>
+
+            {decaCsvImportMessage && (
+              <p
+                role="status"
+                className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800"
+              >
+                {decaCsvImportMessage}
+              </p>
+            )}
+
+            {decaCsvPanelOpen && (
+              <section className="mb-5 space-y-4 rounded-lg border border-blue-200 bg-white p-4">
+                <div>
+                  <h2 className="font-bold text-slate-900">
+                    Importar DeCAs desde CSV
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    El CSV debe incluir fecha (AAAA-MM-DD), cargador,
+                    destinatario, ciudad_destino, mercancia, bultos y peso_kg.
+                    Todas las columnas son obligatorias; las filas importadas
+                    se crearán como borradores.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={downloadDecaCsvTemplate}
+                    className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    <Download size={16} /> Descargar plantilla CSV
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => decaCsvFileRef.current?.click()}
+                    className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-sm font-bold text-white hover:bg-blue-800"
+                  >
+                    <Upload size={16} /> Seleccionar archivo CSV
+                  </button>
+                  <input
+                    ref={decaCsvFileRef}
+                    className="hidden"
+                    type="file"
+                    accept=".csv,text/csv"
+                    aria-label="Seleccionar archivo CSV de DeCAs"
+                    onChange={handleDecaCsvFile}
+                  />
+                </div>
+                {decaCsvReadError && (
+                  <p role="alert" className="text-sm text-red-700">
+                    {decaCsvReadError}
+                  </p>
+                )}
+                {decaCsvPreview && (
+                  <>
+                    <p className="text-sm text-slate-600">
+                      Filas detectadas: {decaCsvPreview.detectedRows} · válidas:{" "}
+                      {validCsvDecas.length} · inválidas:{" "}
+                      {invalidCsvRows.length} · duplicadas:{" "}
+                      {duplicateCsvRows.length}
+                    </p>
+                    {decaCsvPreview.headerError && (
+                      <p role="alert" className="text-sm text-red-700">
+                        {decaCsvPreview.headerError}
+                      </p>
+                    )}
+                    {validCsvDecas.length > 0 && (
+                      <div className="overflow-x-auto">
+                        <p className="mb-1 text-sm font-bold text-slate-800">
+                          Previsualización de filas válidas (máximo 10)
+                        </p>
+                        <table className="w-full min-w-[640px] text-left text-xs">
+                          <thead>
+                            <tr className="border-b text-slate-500">
+                              <th className="p-2">Fila</th>
+                              <th className="p-2">Fecha</th>
+                              <th className="p-2">Cargador</th>
+                              <th className="p-2">Destinatario</th>
+                              <th className="p-2">Ciudad</th>
+                              <th className="p-2">Mercancía</th>
+                              <th className="p-2">Bultos</th>
+                              <th className="p-2">Peso (kg)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {decaCsvPreview.rows
+                              .filter((row) => row.deca && !row.reason)
+                              .slice(0, 10)
+                              .map((row) => (
+                                <tr key={row.rowNumber} className="border-b">
+                                  <td className="p-2">{row.rowNumber}</td>
+                                  <td className="p-2">{row.deca?.fecha}</td>
+                                  <td className="p-2">{row.deca?.cargador}</td>
+                                  <td className="p-2">
+                                    {row.deca?.destinatario}
+                                  </td>
+                                  <td className="p-2">
+                                    {row.deca?.ciudadDestino}
+                                  </td>
+                                  <td className="p-2">{row.deca?.mercancia}</td>
+                                  <td className="p-2">
+                                    {row.deca?.numeroBultos}
+                                  </td>
+                                  <td className="p-2">{row.deca?.pesoKg}</td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {(invalidCsvRows.length > 0 ||
+                      duplicateCsvRows.length > 0) && (
+                      <div className="max-h-48 overflow-auto rounded border border-amber-200 bg-amber-50 p-3">
+                        <p className="mb-2 text-sm font-bold text-amber-900">
+                          Filas omitidas
+                        </p>
+                        <ul className="space-y-1 text-xs text-amber-900">
+                          {[...invalidCsvRows, ...duplicateCsvRows]
+                            .sort(
+                              (left, right) =>
+                                left.rowNumber - right.rowNumber,
+                            )
+                            .map((row) => (
+                              <li key={row.rowNumber}>
+                                Fila {row.rowNumber}: {row.reason}
+                              </li>
+                            ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDecaCsvPanelOpen(false);
+                      setDecaCsvPreview(null);
+                      setDecaCsvReadError("");
+                    }}
+                    className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmDecaCsvImport}
+                    disabled={
+                      !decaCsvPreview ||
+                      Boolean(decaCsvPreview.headerError) ||
+                      validCsvDecas.length === 0
+                    }
+                    className="min-h-10 rounded-lg bg-blue-700 px-3 py-2 text-sm font-bold text-white disabled:opacity-50"
+                  >
+                    Confirmar importación
+                  </button>
+                </div>
+              </section>
+            )}
 
             {decas.length === 0 ? (
               <div className="border-y border-slate-200 bg-white px-5 py-10 text-center text-sm text-slate-500">
