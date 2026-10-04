@@ -1414,7 +1414,10 @@ const DeCASection: React.FC = () => {
   );
   const [decaCsvReadError, setDecaCsvReadError] = useState("");
   const [decaCsvImportMessage, setDecaCsvImportMessage] = useState("");
+  const [decaCsvImportError, setDecaCsvImportError] = useState("");
+  const [decaCsvImporting, setDecaCsvImporting] = useState(false);
   const decaCsvFileRef = useRef<HTMLInputElement>(null);
+  const decaCsvImportInProgressRef = useRef(false);
   const [remoteLoading, setRemoteLoading] = useState(true);
   const [remoteError, setRemoteError] = useState(false);
   const [isRemoteEditSaving, setIsRemoteEditSaving] = useState(false);
@@ -3320,23 +3323,121 @@ const DeCASection: React.FC = () => {
   const duplicateCsvRows =
     decaCsvPreview?.rows.filter((row) => row.duplicate) ?? [];
 
-  const confirmDecaCsvImport = () => {
+  const confirmDecaCsvImport = async () => {
     if (
       !decaCsvPreview ||
       decaCsvPreview.headerError ||
-      validCsvDecas.length === 0
+      validCsvDecas.length === 0 ||
+      decaCsvImportInProgressRef.current
     ) {
       return;
     }
 
-    setDecas((current) => [...validCsvDecas, ...current]);
-    const omitted = decaCsvPreview.detectedRows - validCsvDecas.length;
-    setDecaCsvImportMessage(
-      `${validCsvDecas.length} DeCAs importados correctamente, ${omitted} con errores.`,
-    );
-    setDecaCsvPanelOpen(false);
-    setDecaCsvPreview(null);
-    setDecaCsvReadError("");
+    decaCsvImportInProgressRef.current = true;
+    setDecaCsvImporting(true);
+    setDecaCsvImportMessage("");
+    setDecaCsvImportError("");
+
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        setDecaCsvImportError(
+          "Tu sesión no es válida o ha caducado. Inicia sesión de nuevo antes de importar los DeCAs.",
+        );
+        return;
+      }
+
+      const validRows = decaCsvPreview.rows.flatMap((row) =>
+        row.deca && !row.reason
+          ? [{ rowNumber: row.rowNumber, deca: row.deca }]
+          : [],
+      );
+      const insertedDecas: DeCA[] = [];
+      const failedRows: { rowNumber: number; message: string }[] = [];
+
+      for (const row of validRows) {
+        try {
+          const inserted = await insertUserDeca(row.deca);
+          const reference = { id: inserted.id, userId: inserted.user_id };
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, reference);
+          if (remoteDecaUserIdRef.current === inserted.user_id) {
+            remoteDecaIdsRef.current.add(inserted.id);
+          }
+          insertedDecas.push(mapSupabaseDecaToLocal(inserted));
+        } catch (error) {
+          failedRows.push({
+            rowNumber: row.rowNumber,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Error desconocido al guardar el DeCA.",
+          });
+        }
+      }
+
+      let refreshError = "";
+      try {
+        const refreshedRows = await listUserDecas();
+        const refreshedDecas: DeCA[] = [];
+        for (const row of refreshedRows) {
+          addRemoteDecaReference(DECA_REMOTE_IDS_STORAGE_KEY, {
+            id: row.id,
+            userId: row.user_id,
+          });
+          if (row.user_id === userId) remoteDecaIdsRef.current.add(row.id);
+          if (row.deleted_at === null) {
+            refreshedDecas.push(mapSupabaseDecaToLocal(row));
+          }
+        }
+        const refreshedIds = new Set(refreshedDecas.map((deca) => deca.id));
+        for (const deca of insertedDecas) {
+          if (!refreshedIds.has(deca.id)) refreshedDecas.push(deca);
+        }
+        setDecas((current) => {
+          const merged = current.filter(
+            (deca) => !refreshedIds.has(deca.id),
+          );
+          return [...refreshedDecas, ...merged];
+        });
+      } catch (error) {
+        console.error("No se pudo recargar la lista de DeCAs importados.", error);
+        refreshError =
+          " No se pudo actualizar la lista desde Supabase; las filas confirmadas se muestran localmente.";
+        if (insertedDecas.length > 0) {
+          const insertedIds = new Set(insertedDecas.map((deca) => deca.id));
+          setDecas((current) => [
+            ...insertedDecas.filter(
+              (deca) => !current.some((item) => item.id === deca.id),
+            ),
+            ...current.filter((deca) => !insertedIds.has(deca.id)),
+          ]);
+        }
+      }
+
+      if (failedRows.length === 0) {
+        setDecaCsvImportMessage(
+          `${insertedDecas.length} DeCAs importados y sincronizados correctamente.${refreshError}`,
+        );
+      } else {
+        setDecaCsvImportError(
+          `${insertedDecas.length} importados y sincronizados; ${failedRows.length} no se pudieron guardar.${refreshError}\n${failedRows
+            .map((row) => `Fila ${row.rowNumber}: ${row.message}`)
+            .join("\n")}`,
+        );
+      }
+
+      setDecaCsvPanelOpen(false);
+      setDecaCsvPreview(null);
+      setDecaCsvReadError("");
+    } catch (error) {
+      console.error("No se pudo confirmar la importación CSV de DeCAs.", error);
+      setDecaCsvImportError(
+        `No se pudo validar la sesión o completar la importación. Inicia sesión de nuevo e inténtalo otra vez.${error instanceof Error ? ` ${error.message}` : ""}`,
+      );
+    } finally {
+      decaCsvImportInProgressRef.current = false;
+      setDecaCsvImporting(false);
+    }
   };
 
   const inputClass =
@@ -3553,6 +3654,7 @@ const DeCASection: React.FC = () => {
                     setDecaCsvPreview(null);
                     setDecaCsvReadError("");
                     setDecaCsvImportMessage("");
+                    setDecaCsvImportError("");
                   }}
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50"
                 >
@@ -3574,6 +3676,14 @@ const DeCASection: React.FC = () => {
                 className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800"
               >
                 {decaCsvImportMessage}
+              </p>
+            )}
+            {decaCsvImportError && (
+              <p
+                role="alert"
+                className="mb-4 whitespace-pre-line rounded-lg bg-red-50 p-3 text-sm text-red-800"
+              >
+                {decaCsvImportError}
               </p>
             )}
 
@@ -3714,13 +3824,16 @@ const DeCASection: React.FC = () => {
                     type="button"
                     onClick={confirmDecaCsvImport}
                     disabled={
+                      decaCsvImporting ||
                       !decaCsvPreview ||
                       Boolean(decaCsvPreview.headerError) ||
                       validCsvDecas.length === 0
                     }
                     className="min-h-10 rounded-lg bg-blue-700 px-3 py-2 text-sm font-bold text-white disabled:opacity-50"
                   >
-                    Confirmar importación
+                    {decaCsvImporting
+                      ? "Guardando DeCAs..."
+                      : "Confirmar importación"}
                   </button>
                 </div>
               </section>
