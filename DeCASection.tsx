@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import {
   insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
+  loadUserEmpresaHabitualForDeCA,
   mapSupabaseEmpresaHabitualToLocal,
   updateUserEmpresaHabitual,
 } from "./empresasHabitualesSupabaseService";
@@ -167,7 +168,10 @@ type DeCAForm = Pick<
   DeCA,
   | "fecha"
   | "cargador"
+  | "cargadorId"
+  | "cargadorNif"
   | "destinatario"
+  | "destinatarioNif"
   | "direccionDestino"
   | "ciudadDestino"
   | "numeroBultos"
@@ -1261,6 +1265,9 @@ const loadMatriculas = (): { items: MatriculaHabitual[]; invalid: boolean } => {
 const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   fecha: getToday(),
   cargador: "",
+  cargadorId: "",
+  cargadorNif: "",
+  destinatarioNif: "",
   transportista: defaultCarrier?.nombre ?? "",
   transportistaNif: defaultCarrier?.nif ?? "",
   transportistaDireccion: defaultCarrier?.direccion ?? "",
@@ -1986,6 +1993,29 @@ const DeCASection: React.FC = () => {
   const isSelectedDeCADraft =
     selectedDeCA?.estado === "borrador" || selectedDeCA?.estado === "BORRADOR";
 
+  const findCompany = (name: string) => {
+    const normalizedName = normalizeRecipientText(name);
+    return companies.find(
+      (company) => normalizeRecipientText(company.nombre) === normalizedName,
+    );
+  };
+
+  const loadPdfCompanies = async (deca: DeCA) => {
+    const [cargador, destinatario] = await Promise.all([
+      loadUserEmpresaHabitualForDeCA(
+        deca.cargadorId,
+        deca.cargadorNif,
+        deca.cargador,
+      ),
+      loadUserEmpresaHabitualForDeCA(
+        undefined,
+        deca.destinatarioNif,
+        deca.destinatario,
+      ),
+    ]);
+    return { cargador, destinatario };
+  };
+
   const integrateRemoteDeCA = (row: DecaRow) => {
     const remoteDeCA = mapSupabaseDecaToLocal(row);
     setDecas((current) => {
@@ -2118,16 +2148,59 @@ const DeCASection: React.FC = () => {
         decaId,
         reservation.emissionRequestId,
       );
-      const officialDeCA = mapSupabaseDecaToLocal(remote);
+      const refreshed = await getUserDecaById(decaId);
+      if (
+        !refreshed ||
+        refreshed.estado !== "EMITIENDO" ||
+        refreshed.emission_request_id !== reservation.emissionRequestId
+      ) {
+        throw new Error(
+          "El DeCA cambió durante la emisión; no se generó el PDF oficial.",
+        );
+      }
+      const officialDeCA = mapSupabaseDecaToLocal(refreshed);
+      const { cargador, destinatario } = await loadPdfCompanies(officialDeCA);
+      if (!cargador) {
+        throw new Error(
+          `No se encontró el perfil completo del cargador "${officialDeCA.cargador}" en Empresas habituales.`,
+        );
+      }
+      if (import.meta.env.DEV) {
+        console.debug("[DECA emission PDF trace] resolved data", {
+          decaId: officialDeCA.id,
+          cargador: officialDeCA.cargador,
+          cargadorId: officialDeCA.cargadorId,
+          cargadorNif: officialDeCA.cargadorNif,
+          cargadorCompleto: cargador,
+          empresasDachser: companies.filter((company) =>
+            normalizeRecipientText(company.nombre).includes("dachser"),
+          ),
+          destinatarioCompleto: destinatario,
+          generateOfficialDeCAPdfArgs: [
+            officialDeCA,
+            location.publicUrl,
+            {
+              emittedAt: reservation.emittedAt,
+              documentoId: `DECA-${refreshed.id}`,
+              cargadorNif: refreshed.cargador_nif,
+              destinatarioNif: refreshed.destinatario_nif,
+            },
+            cargador,
+            destinatario,
+          ],
+        });
+      }
       const officialPdf = await generateOfficialDeCAPdf(
         officialDeCA,
         location.publicUrl,
         {
           emittedAt: reservation.emittedAt,
-          documentoId: `DECA-${remote.id}`,
-          cargadorNif: remote.cargador_nif,
-          destinatarioNif: remote.destinatario_nif,
+          documentoId: `DECA-${refreshed.id}`,
+          cargadorNif: refreshed.cargador_nif,
+          destinatarioNif: refreshed.destinatario_nif,
         },
+        cargador,
+        destinatario,
       );
       pdfSha256 = await calculateBlobSha256(officialPdf.blob);
       const uploadResult = await uploadOfficialDeCAPdf(
@@ -2259,16 +2332,17 @@ const DeCASection: React.FC = () => {
   };
 
   const generateSelectedPdf = async (deca: DeCA) => {
-    const findCompany = (name: string) => {
-      const normalizedName = normalizeRecipientText(name);
-      return companies.find(
-        (company) => normalizeRecipientText(company.nombre) === normalizedName,
-      );
-    };
+    const companiesForPdf =
+      deca.estado === "EMITIDO"
+        ? await loadPdfCompanies(deca)
+        : {
+            cargador: findCompany(deca.cargador),
+            destinatario: findCompany(deca.destinatario),
+          };
     return generateDeCAPdf(
       deca,
-      findCompany(deca.cargador),
-      findCompany(deca.destinatario),
+      companiesForPdf.cargador,
+      companiesForPdf.destinatario,
     );
   };
 
@@ -2398,7 +2472,12 @@ const DeCASection: React.FC = () => {
 
   const updateField = (field: keyof DeCAForm, value: string) => {
     editedFieldsRef.current.add(field);
-    const next = { ...formRef.current, [field]: value };
+    const next: DeCAForm = { ...formRef.current, [field]: value };
+    if (field === "cargador") {
+      next.cargadorId = "";
+      next.cargadorNif = "";
+    }
+    if (field === "destinatario") next.destinatarioNif = "";
     formRef.current = next;
     setForm(next);
     if (
@@ -2439,6 +2518,7 @@ const DeCASection: React.FC = () => {
     const next = {
       ...formRef.current,
       destinatario: company.nombre,
+      destinatarioNif: company.nif,
       direccionDestino: company.direccion,
       ciudadDestino: company.ciudad,
     };
@@ -2453,10 +2533,18 @@ const DeCASection: React.FC = () => {
   };
 
   const selectLoaderCompany = (company: EmpresaHabitual) => {
-    updateField("cargador", company.nombre);
+    editedFieldsRef.current.add("cargador");
+    const next: DeCAForm = {
+      ...formRef.current,
+      cargador: company.nombre,
+      cargadorId: company.id,
+      cargadorNif: company.nif,
+    };
+    formRef.current = next;
+    setForm(next);
+    setLoaderLoadedNotice(true);
     setLoaderQuery(company.nombre);
     setLoaderPickerOpen(false);
-    setLoaderLoadedNotice(true);
   };
 
   const matchingTransportistas = (query: string) => {
@@ -3081,8 +3169,11 @@ const DeCASection: React.FC = () => {
             };
             const changes: DecaUpdate = {
               fecha: savedForm.fecha.trim() || null,
+              empresa_habitual_id: savedForm.cargadorId?.trim() || null,
               cargador: savedForm.cargador.trim() || null,
+              cargador_nif: savedForm.cargadorNif?.trim() || null,
               destinatario: savedForm.destinatario.trim() || null,
+              destinatario_nif: savedForm.destinatarioNif?.trim() || null,
               transportista: savedForm.transportista.trim() || null,
               transportista_nif: savedForm.transportistaNif?.trim() || null,
               transportista_direccion:
@@ -3320,6 +3411,8 @@ const DeCASection: React.FC = () => {
     const next: DeCAForm = {
       fecha: selectedDeCA.fecha ?? getToday(),
       cargador: selectedDeCA.cargador ?? "",
+      cargadorId: selectedDeCA.cargadorId ?? "",
+      cargadorNif: selectedDeCA.cargadorNif ?? "",
       transportista: selectedDeCA.transportista ?? "",
       transportistaNif: selectedDeCA.transportistaNif ?? "",
       transportistaDireccion: selectedDeCA.transportistaDireccion ?? "",
@@ -3331,6 +3424,7 @@ const DeCASection: React.FC = () => {
       transportistaEmail: selectedDeCA.transportistaEmail ?? "",
       transportistaNotas: selectedDeCA.transportistaNotas ?? "",
       destinatario: selectedDeCA.destinatario ?? "",
+      destinatarioNif: selectedDeCA.destinatarioNif ?? "",
       direccionDestino: selectedDeCA.direccionDestino ?? "",
       ciudadDestino: selectedDeCA.ciudadDestino ?? "",
       mercancia: selectedDeCA.mercancia ?? "",

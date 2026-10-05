@@ -115,6 +115,14 @@ const makePdf = async (
   destinatario?: EmpresaHabitual,
   overrides?: PdfOverrides,
 ) => {
+  if (import.meta.env.DEV && deca.estado !== "borrador") {
+    console.debug("[DECA PDF trace] makePdf arguments", {
+      deca,
+      cargador,
+      destinatario,
+      overrides,
+    });
+  }
   const documentoId =
     (overrides?.documentoId ?? deca.documentoId) || secureDocumentId(deca.fecha);
   const pdfGeneradoEn = overrides?.pdfGeneradoEn ?? new Date().toISOString();
@@ -228,10 +236,7 @@ const makePdf = async (
 
   writeSection("CARGADOR");
   writeRow("Nombre", deca.cargador);
-  writeRow(
-    "NIF",
-    overrides ? overrides.cargadorNif ?? undefined : cargador?.nif,
-  );
+  writeRow("NIF", overrides?.cargadorNif ?? cargador?.nif);
   writeRow("Dirección", cargador?.direccion);
   writeRow("Código postal", cargador?.codigoPostal);
   writeRow("Ciudad", cargador?.ciudad);
@@ -255,10 +260,7 @@ const makePdf = async (
 
   writeSection("DESTINATARIO");
   writeRow("Nombre", deca.destinatario);
-  writeRow(
-    "NIF",
-    overrides ? overrides.destinatarioNif ?? undefined : destinatario?.nif,
-  );
+  writeRow("NIF", overrides?.destinatarioNif ?? destinatario?.nif);
   writeRow("Dirección", deca.direccionDestino || destinatario?.direccion);
   writeRow("Código postal", destinatario?.codigoPostal);
   writeRow("Ciudad", deca.ciudadDestino || destinatario?.ciudad);
@@ -296,7 +298,18 @@ export const generateOfficialDeCAPdf = async (
   deca: DeCA,
   publicPdfUrl: string,
   values: OfficialDeCAPdfValues,
+  cargador?: EmpresaHabitual,
+  destinatario?: EmpresaHabitual,
 ): Promise<DeCAPdfResult> => {
+  if (import.meta.env.DEV) {
+    console.debug("[DECA PDF trace] generateOfficialDeCAPdf arguments", {
+      deca,
+      publicPdfUrl,
+      values,
+      cargador,
+      destinatario,
+    });
+  }
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(publicPdfUrl);
@@ -327,7 +340,7 @@ export const generateOfficialDeCAPdf = async (
     .join("")
     .toUpperCase();
 
-  return makePdf(deca, undefined, undefined, {
+  return makePdf(deca, cargador, destinatario, {
     qrValue: publicPdfUrl,
     documentoId: values.documentoId,
     pdfGeneradoEn: values.emittedAt,
