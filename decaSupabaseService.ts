@@ -1,5 +1,6 @@
 import type { DeCA } from "./types";
 import { supabase } from "./lib/supabase";
+import { loadUserEmpresaHabitualForDeCA } from "./empresasHabitualesSupabaseService";
 
 export type DecaRow = {
   id: string;
@@ -7,6 +8,7 @@ export type DecaRow = {
   deleted_at: string | null;
   estado: "BORRADOR" | "EMITIENDO" | "EMITIDO";
   fecha: string | null;
+  empresa_habitual_id: string | null;
   cargador: string | null;
   cargador_nif: string | null;
   destinatario: string | null;
@@ -81,7 +83,7 @@ export type FinalizeDecaEmissionInput = {
 };
 
 const DECA_COLUMNS =
-  "id,user_id,deleted_at,estado,fecha,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
+  "id,user_id,deleted_at,estado,fecha,empresa_habitual_id,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
 
 const DECA_PDF_BUCKET = "deca-pdf";
 
@@ -151,6 +153,7 @@ const validateDeCAPdfPathSegment = (value: string, fieldName: string) => {
 
 const UPDATE_COLUMNS = [
   "fecha",
+  "empresa_habitual_id",
   "cargador",
   "cargador_nif",
   "destinatario",
@@ -284,14 +287,20 @@ export async function listUserDecas(): Promise<DecaRow[]> {
 
 export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
   const userId = await requireCurrentUserId();
+  const cargador = await loadUserEmpresaHabitualForDeCA(
+    deca.cargadorId,
+    deca.cargadorNif,
+    deca.cargador,
+  );
   const payload: DecaInsert = {
     user_id: userId,
     estado: mapLocalDecaStatusToSupabase(deca.estado),
     fecha: nullableText(deca.fecha),
+    empresa_habitual_id: cargador?.id ?? null,
     cargador: nullableText(deca.cargador),
-    cargador_nif: null,
+    cargador_nif: nullableText(deca.cargadorNif),
     destinatario: nullableText(deca.destinatario),
-    destinatario_nif: null,
+    destinatario_nif: nullableText(deca.destinatarioNif),
     transportista: nullableText(deca.transportista),
     transportista_nif: nullableText(deca.transportistaNif),
     transportista_direccion: nullableText(deca.transportistaDireccion),
@@ -338,6 +347,14 @@ export async function updateUserDeca(
     if (Object.hasOwn(changes, column)) {
       Object.assign(updatePayload, { [column]: changes[column] });
     }
+  }
+  if (Object.hasOwn(changes, "empresa_habitual_id")) {
+    const cargador = await loadUserEmpresaHabitualForDeCA(
+      changes.empresa_habitual_id,
+      changes.cargador_nif,
+      changes.cargador,
+    );
+    updatePayload.empresa_habitual_id = cargador?.id ?? null;
   }
 
   const { data, error } = await supabase
@@ -600,9 +617,12 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
   return {
     id: row.id,
     fecha: row.fecha ?? row.created_at.slice(0, 10),
+    cargadorId: row.empresa_habitual_id ?? undefined,
     cargador: row.cargador ?? "",
+    cargadorNif: row.cargador_nif ?? undefined,
     transportista: row.transportista ?? "",
     destinatario: row.destinatario ?? "",
+    destinatarioNif: row.destinatario_nif ?? undefined,
     direccionDestino: row.destino ?? "",
     ciudadDestino: row.ciudad_destino ?? "",
     mercancia: row.mercancia ?? "",

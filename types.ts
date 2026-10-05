@@ -85,8 +85,11 @@ export interface DeCA {
   id: string;
   fecha: string;
   cargador: string;
+  cargadorId?: string;
+  cargadorNif?: string;
   transportista: string;
   destinatario: string;
+  destinatarioNif?: string;
   direccionDestino: string;
   ciudadDestino: string;
   mercancia: string;

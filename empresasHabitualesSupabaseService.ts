@@ -1,6 +1,7 @@
 ﻿import { supabase } from "./lib/supabase";
 import type { Database } from "./database.types";
 import type { EmpresaHabitual } from "./types";
+import { normalizeRecipientText } from "./destinatariosService";
 
 export type EmpresaHabitualRow =
   Database["public"]["Tables"]["empresas_habituales"]["Row"];
@@ -80,6 +81,69 @@ export async function getUserEmpresaHabitual(
   }
 
   return data;
+}
+
+export async function loadUserEmpresaHabitualForDeCA(
+  id: string | null | undefined,
+  nif: string | null | undefined,
+  nombre: string | null | undefined,
+): Promise<EmpresaHabitual | undefined> {
+  const userId = await requireCurrentUserId();
+
+  if (id?.trim()) {
+    const { data, error } = await supabase
+      .from("empresas_habituales")
+      .select(EMPRESA_COLUMNS)
+      .eq("id", id)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (error) {
+      return throwSupabaseError(
+        "No se pudo cargar la empresa habitual del DeCA",
+        error.message,
+      );
+    }
+    if (data) return mapSupabaseEmpresaHabitualToLocal(data);
+  }
+
+  if (nif?.trim()) {
+    const { data, error } = await supabase
+      .from("empresas_habituales")
+      .select(EMPRESA_COLUMNS)
+      .eq("user_id", userId)
+      .eq("nif", nif.trim())
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      return throwSupabaseError(
+        "No se pudo buscar la empresa habitual por NIF",
+        error.message,
+      );
+    }
+    if (data) return mapSupabaseEmpresaHabitualToLocal(data);
+  }
+
+  const normalizedName = normalizeRecipientText(nombre ?? "");
+  if (!normalizedName) return undefined;
+
+  const { data, error } = await supabase
+    .from("empresas_habituales")
+    .select(EMPRESA_COLUMNS)
+    .eq("user_id", userId)
+    .order("nombre", { ascending: true });
+
+  if (error) {
+    return throwSupabaseError(
+      "No se pudo buscar la empresa habitual por nombre",
+      error.message,
+    );
+  }
+  const match = (data ?? []).find(
+    (row) => normalizeRecipientText(row.nombre) === normalizedName,
+  );
+  return match ? mapSupabaseEmpresaHabitualToLocal(match) : undefined;
 }
 
 export async function insertUserEmpresaHabitual(
