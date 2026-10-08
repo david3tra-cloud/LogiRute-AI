@@ -19,17 +19,28 @@ export interface Location {
 
 export interface Delivery {
   id: string;
+  decaId?: string;
+  sourceType?: "DECA";
   concept?: string; // New field for short stop name
   recipient: string;
   address: string;
   phone?: string;
-  coordinates: [number, number]; // [lat, lng]
+  coordinates?: [number, number]; // [lat, lng]
   status: DeliveryStatus;
   type: DeliveryType;
   notes?: string;
   estimatedTime?: string;
   sourceUrl?: string;
 }
+
+export type AddDeCAToRoutesResult =
+  | {
+      status: "added";
+      coordinatesAvailable: boolean;
+      geocodingError?: string;
+    }
+  | { status: "already-in-routes" }
+  | { status: "in-progress" };
 
 export interface RouteStats {
   totalDistance: number;

@@ -62,19 +62,80 @@ export async function geocodeAddress(address: string) {
     address
   )}&key=${GEOCODING_API_KEY}&region=${DEFAULT_REGION}`;
 
-  console.log("GEOCODING URL:", url);
-  const res = await fetch(url);
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch {
+    throw new Error("No se pudo conectar con Google Geocoding.");
+  }
+
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Error al llamar a Geocoding: ${res.status} - ${txt}`);
+    throw new Error(
+      `Google Geocoding respondió con un error HTTP (${res.status}).`
+    );
   }
 
-  const data = await res.json();
-
-  if (data.status !== "OK" || !data.results.length) {
-    throw new Error("No se ha podido encontrar esa dirección");
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error("Google Geocoding devolvió una respuesta no válida.");
   }
 
-  const loc = data.results[0].geometry.location;
+  if (!data || typeof data !== "object" || !("status" in data)) {
+    throw new Error("Google Geocoding devolvió una respuesta no válida.");
+  }
+
+  const response = data as {
+    status: unknown;
+    results?: unknown;
+  };
+  if (response.status !== "OK") {
+    if (response.status === "ZERO_RESULTS") {
+      throw new Error("Google Geocoding no encontró esa dirección.");
+    }
+    const status =
+      typeof response.status === "string" ? ` (${response.status})` : "";
+    throw new Error(
+      `Google Geocoding no pudo completar la búsqueda${status}.`
+    );
+  }
+
+  if (!Array.isArray(response.results) || response.results.length === 0) {
+    throw new Error("Google Geocoding no encontró una ubicación usable.");
+  }
+
+  const firstResult = response.results[0];
+  if (
+    !firstResult ||
+    typeof firstResult !== "object" ||
+    !("geometry" in firstResult)
+  ) {
+    throw new Error("Google Geocoding no encontró una ubicación usable.");
+  }
+
+  const geometry = firstResult.geometry;
+  if (
+    !geometry ||
+    typeof geometry !== "object" ||
+    !("location" in geometry)
+  ) {
+    throw new Error("Google Geocoding no encontró una ubicación usable.");
+  }
+
+  const loc = geometry.location;
+  if (
+    !loc ||
+    typeof loc !== "object" ||
+    !("lat" in loc) ||
+    !("lng" in loc) ||
+    typeof loc.lat !== "number" ||
+    typeof loc.lng !== "number" ||
+    !Number.isFinite(loc.lat) ||
+    !Number.isFinite(loc.lng)
+  ) {
+    throw new Error("Google Geocoding no encontró una ubicación usable.");
+  }
+
   return { lat: loc.lat, lng: loc.lng };
 }

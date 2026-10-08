@@ -16,6 +16,7 @@ import {
   Phone,
   X,
   Tag,
+  Pencil,
 } from 'lucide-react';
 
 interface DeliveryCardProps {
@@ -25,6 +26,7 @@ interface DeliveryCardProps {
   forceExpanded?: boolean;
   onToggleExpand?: (expanded: boolean) => void;
   onClick: () => void;
+  onEdit: (delivery: Delivery) => void;
   onStatusChange: (id: string, status: DeliveryStatus) => void;
   onDelete: (id: string) => void;
   onRemoveFromSequence: (id: string) => void;
@@ -37,6 +39,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
   forceExpanded = false,
   onToggleExpand,
   onClick,
+  onEdit,
   onStatusChange,
   onDelete,
   onRemoveFromSequence,
@@ -169,6 +172,14 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
   };
 
   const navigationUrl = buildNavigationUrl();
+  const cardTitle =
+    delivery.sourceType === 'DECA'
+      ? delivery.recipient.trim() || 'Destinatario no especificado'
+      : delivery.concept || delivery.recipient;
+  const recipientIsTitle =
+    delivery.recipient.trim().length > 0 &&
+    cardTitle.trim().toLocaleLowerCase() ===
+      delivery.recipient.trim().toLocaleLowerCase();
 
   return (
     <div
@@ -206,7 +217,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
             <div className="flex flex-col min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="font-bold truncate text-sm md:text-base text-slate-800 uppercase tracking-tight">
-                  {delivery.concept || delivery.recipient}
+                  {cardTitle}
                 </h3>
                 <span
                   className={`text-[9px] font-black px-1.5 py-0.5 rounded flex items-center gap-1 uppercase tracking-tighter ${
@@ -243,6 +254,20 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
           <div className="flex items-center gap-1 shrink-0 ml-2">
             <button
               type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit(delivery);
+              }}
+              className="flex items-center gap-1 p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-white transition-all text-[10px] font-bold"
+              title="Editar parada"
+            >
+              <Pencil size={14} />
+              <span>Editar</span>
+            </button>
+            <button
+              type="button"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
@@ -265,7 +290,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
         {internalExpanded && (
           <div className="mt-3 pt-3 border-t border-slate-200/50 animate-in slide-in-from-top-2 duration-200">
             <div className="space-y-4">
-              {delivery.concept && (
+              {delivery.concept && delivery.recipient && !recipientIsTitle && (
                 <div className="text-[11px] text-slate-700 bg-blue-50 border border-blue-100 p-2 rounded-lg flex items-center gap-2">
                   <Tag size={12} className="text-blue-500" />
                   <span className="font-bold uppercase tracking-tight">

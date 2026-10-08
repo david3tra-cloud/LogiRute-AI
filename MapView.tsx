@@ -22,16 +22,16 @@ const MapView: React.FC<MapViewProps> = ({
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
 
-  const isValidLatLng = (coords: any): coords is [number, number] => {
+  const isValidLatLng = (
+    coords: [number, number] | undefined,
+  ): coords is [number, number] => {
     return (
       Array.isArray(coords) &&
       coords.length === 2 &&
       typeof coords[0] === 'number' &&
       typeof coords[1] === 'number' &&
-      !isNaN(coords[0]) &&
-      !isNaN(coords[1]) &&
-      isFinite(coords[0]) &&
-      isFinite(coords[1])
+      Number.isFinite(coords[0]) &&
+      Number.isFinite(coords[1])
     );
   };
 
@@ -80,7 +80,10 @@ const MapView: React.FC<MapViewProps> = ({
     });
     markersRef.current = {};
 
-    const validDeliveries = deliveries.filter((d) => isValidLatLng(d.coordinates));
+    const validDeliveries = deliveries.filter(
+      (delivery): delivery is Delivery & { coordinates: [number, number] } =>
+        isValidLatLng(delivery.coordinates),
+    );
 
     validDeliveries.forEach((delivery) => {
       let color = '#3b82f6';

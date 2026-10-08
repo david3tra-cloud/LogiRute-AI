@@ -20,7 +20,13 @@ import MapView from "./MapView";
 import DeliveryCard from "./DeliveryCard";
 import Auth from "./lib/Auth";
 import { supabase } from "./lib/supabase";
-import { Delivery, DeliveryStatus, DeliveryType } from "./types";
+import {
+  AddDeCAToRoutesResult,
+  DeCA,
+  Delivery,
+  DeliveryStatus,
+  DeliveryType,
+} from "./types";
 import DeCASection from "./DeCASection";
 import BillingSection from "./BillingSection";
 import { parseAddress } from "./groqService";
@@ -142,6 +148,9 @@ const App: React.FC = () => {
     const saved = safeGetItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : [];
   });
+  const deliveriesRef = useRef(deliveries);
+  deliveriesRef.current = deliveries;
+  const importingDeCAIdsRef = useRef(new Set<string>());
 
   const [manualSequence, setManualSequence] = useState<string[]>(() => {
     const saved = safeGetItem(SEQUENCE_KEY);
@@ -157,11 +166,15 @@ const App: React.FC = () => {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
+  const [editingDelivery, setEditingDelivery] = useState<Delivery | null>(null);
 
   const [conceptInput, setConceptInput] = useState("");
   const [unifiedInput, setUnifiedInput] = useState("");
+  const [editAddressInput, setEditAddressInput] = useState("");
   const [newPhoneInput, setNewPhoneInput] = useState("");
   const [newCoordsInput, setNewCoordsInput] = useState("");
+  const [editNotesInput, setEditNotesInput] = useState("");
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
 
   const [newType, setNewType] = useState<DeliveryType>(DeliveryType.DELIVERY);
   const [isParsing, setIsParsing] = useState(false);
@@ -344,8 +357,108 @@ const App: React.FC = () => {
     if (error) alert("No se pudo cerrar la sesión. Inténtalo de nuevo.");
   };
 
+  const openAddDelivery = () => {
+    setEditingDelivery(null);
+    setConceptInput("");
+    setUnifiedInput("");
+    setEditAddressInput("");
+    setNewPhoneInput("");
+    setNewCoordsInput("");
+    setEditNotesInput("");
+    setNewType(DeliveryType.DELIVERY);
+    setRouteNotice(null);
+    setIsAdding(true);
+  };
+
+  const openEditDelivery = (delivery: Delivery) => {
+    setEditingDelivery(delivery);
+    setConceptInput(delivery.concept ?? "");
+    setUnifiedInput(delivery.recipient);
+    setEditAddressInput(delivery.address);
+    setNewPhoneInput(delivery.phone ?? "");
+    setNewCoordsInput("");
+    setEditNotesInput(delivery.notes ?? "");
+    setNewType(delivery.type);
+    setRouteNotice(null);
+    setIsAdding(true);
+  };
+
+  const closeDeliveryForm = () => {
+    setIsAdding(false);
+    setEditingDelivery(null);
+  };
+
+  const handleSaveDelivery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDelivery || isParsing) return;
+
+    const address = editAddressInput.trim();
+    const addressChanged = address !== editingDelivery.address.trim();
+    let coordinates: [number, number] | undefined;
+    let geocodingWarning: string | undefined;
+
+    setIsParsing(true);
+    setParsingMessage("Actualizando parada...");
+
+    try {
+      if (addressChanged) {
+        if (address) {
+          try {
+            const geocoded = await geocodeAddress(address);
+            if (
+              Number.isFinite(geocoded.lat) &&
+              Number.isFinite(geocoded.lng)
+            ) {
+              coordinates = [geocoded.lat, geocoded.lng];
+            } else {
+              geocodingWarning =
+                "No se obtuvieron coordenadas válidas para la nueva dirección.";
+            }
+          } catch (error) {
+            geocodingWarning =
+              error instanceof Error
+                ? `No se pudo geocodificar la nueva dirección: ${error.message}`
+                : "No se pudo geocodificar la nueva dirección.";
+          }
+        } else {
+          geocodingWarning =
+            "La parada se guardó sin ubicación porque la dirección está vacía.";
+        }
+      }
+
+      setDeliveries((prev) =>
+        prev.map((delivery) =>
+          delivery.id === editingDelivery.id
+            ? {
+                ...delivery,
+                concept: conceptInput.trim() || undefined,
+                recipient: unifiedInput.trim(),
+                address,
+                phone: newPhoneInput.trim() || undefined,
+                notes: editNotesInput.trim() || undefined,
+                type: newType,
+                ...(addressChanged && { coordinates }),
+              }
+            : delivery,
+        ),
+      );
+
+      if (geocodingWarning) {
+        setRouteNotice(geocodingWarning);
+      }
+      closeDeliveryForm();
+    } finally {
+      setIsParsing(false);
+      setParsingMessage(null);
+    }
+  };
+
   const handleAddDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editingDelivery) {
+      await handleSaveDelivery(e);
+      return;
+    }
     if (isParsing) return;
 
     const search = unifiedInput.trim();
@@ -400,6 +513,120 @@ const App: React.FC = () => {
     setDeliveries((prev) => prev.filter((d) => d.id !== id));
     setManualSequence((prev) => prev.filter((x) => x !== id));
     if (selectedId === id) setSelectedId(null);
+  };
+
+  const handleAddDeCAToRoutes = async (
+    deca: DeCA,
+  ): Promise<AddDeCAToRoutesResult> => {
+    if (deca.estado !== "EMITIDO") {
+      throw new Error("Solo se pueden añadir DeCAs emitidos a Rutas.");
+    }
+
+    if (
+      deliveries.some((delivery) => delivery.decaId === deca.id) ||
+      deliveriesRef.current.some((delivery) => delivery.decaId === deca.id)
+    ) {
+      return { status: "already-in-routes" };
+    }
+
+    if (importingDeCAIdsRef.current.has(deca.id)) {
+      return { status: "in-progress" };
+    }
+    importingDeCAIdsRef.current.add(deca.id);
+
+    try {
+      const safeText = (value: string | null | undefined) =>
+        (value ?? "").replace(/\s+/g, " ").trim();
+      const displayAddress = [
+        safeText(deca.direccionDestino),
+        safeText(deca.ciudadDestino),
+      ].filter(Boolean);
+      const address = displayAddress.join(", ");
+      const geocodingQuery = [
+        safeText(deca.destinatario),
+        safeText(deca.direccionDestino),
+        safeText(deca.ciudadDestino),
+      ]
+        .filter(Boolean)
+        .join(", ");
+      let coordinates: [number, number] | undefined;
+      let geocodingError: string | undefined;
+
+      if (geocodingQuery) {
+        try {
+          const geocoded = await geocodeAddress(geocodingQuery);
+          if (
+            Number.isFinite(geocoded.lat) &&
+            Number.isFinite(geocoded.lng)
+          ) {
+            coordinates = [geocoded.lat, geocoded.lng];
+          } else {
+            geocodingError =
+              "Google Geocoding no devolvió coordenadas válidas.";
+          }
+        } catch (error) {
+          geocodingError =
+            error instanceof Error
+              ? error.message
+              : "No se pudo geocodificar la dirección.";
+        }
+      } else {
+        geocodingError =
+          "El DeCA no contiene datos de ubicación para geocodificar.";
+      }
+
+      if (deliveriesRef.current.some((delivery) => delivery.decaId === deca.id)) {
+        return { status: "already-in-routes" };
+      }
+
+      const randomUUID = globalThis.crypto?.randomUUID;
+      if (!randomUUID) {
+        throw new Error("No se pudo generar un identificador seguro.");
+      }
+
+      const notes = [
+        safeText(deca.fecha) && `Fecha: ${safeText(deca.fecha)}`,
+        safeText(deca.mercancia) &&
+          `Mercancía: ${safeText(deca.mercancia)}`,
+        safeText(deca.numeroBultos) &&
+          `Bultos: ${safeText(deca.numeroBultos)}`,
+        safeText(deca.pesoKg) && `Peso: ${safeText(deca.pesoKg)} kg`,
+        safeText(deca.matriculaVehiculo) &&
+          `Matrícula: ${safeText(deca.matriculaVehiculo)}`,
+        safeText(deca.referenciaAlbaran) &&
+          `Referencia: ${safeText(deca.referenciaAlbaran)}`,
+      ].filter(Boolean).join(" · ");
+
+      const newDelivery: Delivery = {
+        id: `deca-${randomUUID.call(globalThis.crypto)}`,
+        decaId: deca.id,
+        sourceType: "DECA",
+        concept:
+          safeText(deca.referenciaAlbaran) ||
+          safeText(deca.mercancia) ||
+          "DeCA emitido",
+        recipient: safeText(deca.destinatario),
+        address,
+        coordinates,
+        status: DeliveryStatus.PENDING,
+        type: DeliveryType.DELIVERY,
+        notes: notes || undefined,
+      };
+
+      deliveriesRef.current = [...deliveriesRef.current, newDelivery];
+      setDeliveries((prev) =>
+        prev.some((delivery) => delivery.decaId === deca.id)
+          ? prev
+          : [...prev, newDelivery],
+      );
+      return {
+        status: "added",
+        coordinatesAvailable: coordinates !== undefined,
+        ...(geocodingError && { geocodingError }),
+      };
+    } finally {
+      importingDeCAIdsRef.current.delete(deca.id);
+    }
   };
 
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
@@ -828,7 +1055,7 @@ const App: React.FC = () => {
 
               <div className="hidden sm:flex items-center gap-2">
                 <button
-                  onClick={() => setIsAdding(true)}
+                  onClick={openAddDelivery}
                   className="bg-blue-600 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md hover:bg-blue-700 transition"
                 >
                   <Plus size={14} /> Nueva parada
@@ -860,7 +1087,7 @@ const App: React.FC = () => {
           {/* barra acciones móvil */}
           <div className="sm:hidden bg-white border-b px-3 py-2 flex items-center justify-end gap-2">
             <button
-              onClick={() => setIsAdding(true)}
+              onClick={openAddDelivery}
               className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md"
             >
               <Plus size={14} /> Nueva
@@ -886,6 +1113,23 @@ const App: React.FC = () => {
               <span>PRO</span>
             </button>
           </div>
+
+          {routeNotice && (
+            <div
+              role="status"
+              className="flex items-center justify-between gap-3 bg-amber-50 border-b border-amber-200 px-4 py-3 text-sm text-amber-800"
+            >
+              <span>{routeNotice}</span>
+              <button
+                type="button"
+                onClick={() => setRouteNotice(null)}
+                className="shrink-0 rounded-lg p-1 hover:bg-amber-100"
+                aria-label="Cerrar aviso"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
 
           {/* MAIN */}
           <main className="flex-1 flex flex-col sm:flex-row overflow-hidden">
@@ -1026,6 +1270,7 @@ const App: React.FC = () => {
                             index={index}
                             isSelected={selectedId === d.id}
                             onClick={() => setSelectedId(d.id)}
+                            onEdit={openEditDelivery}
                             onStatusChange={(id, status) =>
                               handleStatusChange(id, status)
                             }
@@ -1060,6 +1305,7 @@ const App: React.FC = () => {
                             index={index}
                             isSelected={selectedId === d.id}
                             onClick={() => setSelectedId(d.id)}
+                            onEdit={openEditDelivery}
                             onStatusChange={(id, status) =>
                               handleStatusChange(id, status)
                             }
@@ -1079,23 +1325,27 @@ const App: React.FC = () => {
             )}
           </main>
 
-          {/* Modal Nueva Parada */}
+          {/* Modal Nueva Parada / Editar Parada */}
           {isAdding && (
             <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
-              <div className="bg-white rounded-[40px] w-full max-w-xl shadow-2xl overflow-hidden">
+              <div className="bg-white rounded-[40px] w-full max-w-xl max-h-[90vh] shadow-2xl overflow-hidden">
                 <div className="p-8 border-b flex justify-between items-center bg-slate-50/40">
                   <h3 className="text-2xl font-black uppercase tracking-tighter italic">
-                    Nueva Parada
+                    {editingDelivery ? "Editar Parada" : "Nueva Parada"}
                   </h3>
                   <button
-                    onClick={() => setIsAdding(false)}
+                    type="button"
+                    onClick={closeDeliveryForm}
                     className="p-2 hover:bg-slate-200 rounded-xl"
                   >
                     <X size={24} />
                   </button>
                 </div>
 
-                <form onSubmit={handleAddDelivery} className="p-8 space-y-6">
+                <form
+                  onSubmit={handleAddDelivery}
+                  className="p-8 space-y-6 max-h-[calc(90vh-100px)] overflow-y-auto"
+                >
                   <div className="flex bg-slate-100 p-1.5 rounded-3xl">
                     <button
                       type="button"
@@ -1121,34 +1371,59 @@ const App: React.FC = () => {
                     </button>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                      Nombre, Comercio o Dirección
-                    </label>
-                    <div className="relative">
-                      <MapPin
-                        className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
-                        size={20}
-                      />
-                      <textarea
-                        value={unifiedInput}
-                        onChange={(e) => setUnifiedInput(e.target.value)}
-                        className="w-full h-28 pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
-                        placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10"
-                      />
-                      <button
-                        type="button"
-                        onClick={toggleListening}
-                        className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
-                          isListening
-                            ? "bg-red-500 text-white animate-pulse"
-                            : "bg-slate-100 text-slate-400"
-                        }`}
-                      >
-                        <Mic size={18} />
-                      </button>
+                  {editingDelivery ? (
+                    <>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                          Destinatario
+                        </label>
+                        <textarea
+                          value={unifiedInput}
+                          onChange={(e) => setUnifiedInput(e.target.value)}
+                          className="w-full h-20 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                          Dirección
+                        </label>
+                        <textarea
+                          value={editAddressInput}
+                          onChange={(e) => setEditAddressInput(e.target.value)}
+                          className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                        Nombre, Comercio o Dirección
+                      </label>
+                      <div className="relative">
+                        <MapPin
+                          className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                          size={20}
+                        />
+                        <textarea
+                          value={unifiedInput}
+                          onChange={(e) => setUnifiedInput(e.target.value)}
+                          className="w-full h-28 pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                          placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10"
+                        />
+                        <button
+                          type="button"
+                          onClick={toggleListening}
+                          className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
+                            isListening
+                              ? "bg-red-500 text-white animate-pulse"
+                              : "bg-slate-100 text-slate-400"
+                          }`}
+                        >
+                          <Mic size={18} />
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
@@ -1168,24 +1443,26 @@ const App: React.FC = () => {
                         />
                       </div>
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                        Coordenadas / Plus Code
-                      </label>
-                      <div className="relative">
-                        <MapPin
-                          className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
-                          size={16}
-                        />
-                        <input
-                          type="text"
-                          value={newCoordsInput}
-                          onChange={(e) => setNewCoordsInput(e.target.value)}
-                          className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
-                          placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche"
-                        />
+                    {!editingDelivery && (
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                          Coordenadas / Plus Code
+                        </label>
+                        <div className="relative">
+                          <MapPin
+                            className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
+                            size={16}
+                          />
+                          <input
+                            type="text"
+                            value={newCoordsInput}
+                            onChange={(e) => setNewCoordsInput(e.target.value)}
+                            className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
+                            placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche"
+                          />
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
 
                   <div className="space-y-2">
@@ -1206,11 +1483,36 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
+                  {editingDelivery && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                        Notas
+                      </label>
+                      <textarea
+                        value={editNotesInput}
+                        onChange={(e) => setEditNotesInput(e.target.value)}
+                        className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-sm resize-none"
+                      />
+                    </div>
+                  )}
+
+                  {editingDelivery && (
+                    <button
+                      type="button"
+                      onClick={closeDeliveryForm}
+                      className="w-full py-4 bg-slate-100 text-slate-700 rounded-[30px] font-black uppercase hover:bg-slate-200"
+                    >
+                      Cancelar
+                    </button>
+                  )}
+
                   <button
                     type="submit"
                     disabled={
                       isParsing ||
-                      (!unifiedInput.trim() && !newCoordsInput.trim())
+                      (!editingDelivery &&
+                        !unifiedInput.trim() &&
+                        !newCoordsInput.trim())
                     }
                     className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4"
                   >
@@ -1222,9 +1524,9 @@ const App: React.FC = () => {
                         </span>
                       </div>
                     ) : (
-                      <Plus size={24} />
+                      editingDelivery ? null : <Plus size={24} />
                     )}
-                    Añadir Parada
+                    {editingDelivery ? "Guardar cambios" : "Añadir Parada"}
                   </button>
                 </form>
               </div>
@@ -1235,7 +1537,12 @@ const App: React.FC = () => {
       <section
         className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "decas" ? "block" : "hidden"}`}
       >
-        <DeCASection />
+        <DeCASection
+          isDeCAInRoutes={(decaId) =>
+            deliveries.some((delivery) => delivery.decaId === decaId)
+          }
+          onAddToRoutes={handleAddDeCAToRoutes}
+        />
       </section>
       <section
         className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "billing" ? "block" : "hidden"}`}

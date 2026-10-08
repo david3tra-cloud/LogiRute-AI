@@ -3,6 +3,18 @@ import { Delivery, DeliveryStatus } from "./types";
 
 type Point = { lat: number; lng: number };
 
+function hasValidCoordinates(
+  delivery: Delivery,
+): delivery is Delivery & { coordinates: [number, number] } {
+  const coordinates = delivery.coordinates;
+  return (
+    Array.isArray(coordinates) &&
+    coordinates.length === 2 &&
+    Number.isFinite(coordinates[0]) &&
+    Number.isFinite(coordinates[1])
+  );
+}
+
 function distance(p1: Point, p2: Point): number {
   const dLat = p1.lat - p2.lat;
   const dLng = p1.lng - p2.lng;
@@ -31,11 +43,7 @@ export function optimizeDeliveries(
   const withoutCoords: Delivery[] = [];
 
   for (const d of active) {
-    if (
-      Array.isArray(d.coordinates) &&
-      typeof d.coordinates[0] === "number" &&
-      typeof d.coordinates[1] === "number"
-    ) {
+    if (hasValidCoordinates(d)) {
       withCoords.push(d);
     } else {
       withoutCoords.push(d);

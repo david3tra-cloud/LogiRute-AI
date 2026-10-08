@@ -19,6 +19,7 @@ import {
   Upload,
 } from "lucide-react";
 import {
+  AddDeCAToRoutesResult,
   DeCA,
   EmpresaHabitual,
   MatriculaHabitual,
@@ -1377,7 +1378,15 @@ const getTransportistaDetails = (deca: DeCA): [string, string][] => {
   return details.filter(([, value]) => Boolean(value));
 };
 
-const DeCASection: React.FC = () => {
+interface DeCASectionProps {
+  isDeCAInRoutes: (decaId: string) => boolean;
+  onAddToRoutes: (deca: DeCA) => Promise<AddDeCAToRoutesResult>;
+}
+
+const DeCASection: React.FC<DeCASectionProps> = ({
+  isDeCAInRoutes,
+  onAddToRoutes,
+}) => {
   const [initialCompanyLoad] = useState(loadEmpresas);
   const [companies, setCompanies] = useState<EmpresaHabitual[]>(
     initialCompanyLoad.items,
@@ -1444,6 +1453,11 @@ const DeCASection: React.FC = () => {
   const [plateEditValue, setPlateEditValue] = useState("");
   const [plateManagerMessage, setPlateManagerMessage] = useState("");
   const [decas, setDecas] = useState<DeCA[]>(loadDecas);
+  const [addingDeCAIds, setAddingDeCAIds] = useState<string[]>([]);
+  const addingDeCAIdsRef = useRef(new Set<string>());
+  const [routeAddMessages, setRouteAddMessages] = useState<
+    Record<string, { kind: "success" | "warning" | "error"; text: string }>
+  >({});
   const [qrOpenDeCA, setQrOpenDeCA] = useState<DeCA | null>(null);
   const [decaCsvPanelOpen, setDecaCsvPanelOpen] = useState(false);
   const [decaCsvPreview, setDecaCsvPreview] = useState<DecaCsvPreview | null>(
@@ -1990,6 +2004,61 @@ const DeCASection: React.FC = () => {
   }, [view]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
+  const addDeCAToRoutes = async (deca: DeCA) => {
+    if (
+      deca.estado !== "EMITIDO" ||
+      isDeCAInRoutes(deca.id) ||
+      addingDeCAIdsRef.current.has(deca.id)
+    ) {
+      return;
+    }
+
+    addingDeCAIdsRef.current.add(deca.id);
+    setAddingDeCAIds((current) => [...current, deca.id]);
+    setRouteAddMessages((current) => {
+      const next = { ...current };
+      delete next[deca.id];
+      return next;
+    });
+
+    try {
+      const result = await onAddToRoutes(deca);
+      switch (result.status) {
+        case "added":
+          setRouteAddMessages((current) => ({
+            ...current,
+            [deca.id]: {
+              kind: result.coordinatesAvailable ? "success" : "warning",
+              text: result.coordinatesAvailable
+                ? "Añadido a Rutas."
+                : "Añadido a Rutas sin ubicación en el mapa. Revisa la dirección del destinatario.",
+            },
+          }));
+          break;
+        case "already-in-routes":
+        case "in-progress":
+          setRouteAddMessages((current) => {
+            const next = { ...current };
+            delete next[deca.id];
+            return next;
+          });
+          break;
+      }
+    } catch {
+      setRouteAddMessages((current) => ({
+        ...current,
+        [deca.id]: {
+          kind: "error",
+          text: "No se pudo añadir a Rutas. Inténtalo de nuevo.",
+        },
+      }));
+    } finally {
+      addingDeCAIdsRef.current.delete(deca.id);
+      setAddingDeCAIds((current) =>
+        current.filter((id) => id !== deca.id),
+      );
+    }
+  };
   const isSelectedDeCADraft =
     selectedDeCA?.estado === "borrador" || selectedDeCA?.estado === "BORRADOR";
 
@@ -6011,6 +6080,23 @@ const DeCASection: React.FC = () => {
                         Abrir PDF oficial
                       </button>
                     )}
+                  {selectedDeCA.estado === "EMITIDO" && (
+                    <button
+                      type="button"
+                      onClick={() => void addDeCAToRoutes(selectedDeCA)}
+                      disabled={
+                        isDeCAInRoutes(selectedDeCA.id) ||
+                        addingDeCAIds.includes(selectedDeCA.id)
+                      }
+                      className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-blue-700 bg-white px-4 py-2.5 text-sm font-bold text-blue-800 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {addingDeCAIds.includes(selectedDeCA.id)
+                        ? "Añadiendo…"
+                        : isDeCAInRoutes(selectedDeCA.id)
+                          ? "Ya está en Rutas"
+                          : "Añadir a Rutas"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     aria-label="Descargar PDF del DeCA"
@@ -6040,6 +6126,25 @@ const DeCASection: React.FC = () => {
                     Guardar en Google Drive
                   </button>
                 </div>
+                {selectedDeCA.estado === "EMITIDO" &&
+                  routeAddMessages[selectedDeCA.id] && (
+                    <p
+                      className={`mt-3 text-sm font-medium ${
+                        routeAddMessages[selectedDeCA.id].kind === "error"
+                          ? "text-red-700"
+                          : routeAddMessages[selectedDeCA.id].kind === "warning"
+                            ? "text-amber-700"
+                            : "text-emerald-700"
+                      }`}
+                      role={
+                        routeAddMessages[selectedDeCA.id].kind === "error"
+                          ? "alert"
+                          : "status"
+                      }
+                    >
+                      {routeAddMessages[selectedDeCA.id].text}
+                    </p>
+                  )}
                 <p className="mt-3 text-xs text-slate-500">
                   Descargar PDF y Guardar en Google Drive generan copias de
                   trabajo; solo el PDF emitido y abierto desde su enlace oficial
