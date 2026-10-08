@@ -29,7 +29,6 @@ import {
 } from "./types";
 import DeCASection from "./DeCASection";
 import BillingSection from "./BillingSection";
-import { parseAddress } from "./groqService";
 import { geocodeAddress } from "./geocodingService";
 import { optimizeDeliveries } from "./routeService";
 import {
@@ -53,6 +52,117 @@ const VIEW_MODE_KEY = "logiroute_viewmode_v1";
 const SEQUENCE_KEY = "logiroute_sequence_v1";
 const PASSWORD_RECOVERY_PENDING_STORAGE_KEY =
   "logiroute_password_recovery_pending_v1";
+
+type ParsedLocationInput =
+  | { kind: "empty" }
+  | { kind: "coordinates"; value: [number, number] }
+  | { kind: "plus-code"; value: string }
+  | { kind: "invalid"; message: string };
+
+const parseLocationInput = (input: string): ParsedLocationInput => {
+  const value = input.trim();
+  if (!value) return { kind: "empty" };
+
+  const coordinateMatch = value.match(
+    /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))$/,
+  );
+  if (coordinateMatch) {
+    const lat = Number(coordinateMatch[1]);
+    const lng = Number(coordinateMatch[2]);
+    if (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180
+    ) {
+      return { kind: "coordinates", value: [lat, lng] };
+    }
+    return {
+      kind: "invalid",
+      message:
+        "Las coordenadas deben estar dentro de los rangos válidos: latitud -90 a 90 y longitud -180 a 180.",
+    };
+  }
+
+  const plusCodeMatch = value.match(/^([A-Z0-9]+\+[A-Z0-9]+)(?:\s+(.+))?$/i);
+  if (plusCodeMatch) {
+    const code = plusCodeMatch[1].toUpperCase();
+    const locality = plusCodeMatch[2]?.trim();
+    const [prefix, suffix] = code.split("+");
+    const separatorPosition = prefix.length;
+    const validSeparator = [2, 4, 6, 8].includes(separatorPosition);
+    const validPrefix =
+      /^[23456789CFGHJMPQRVWX]+$/i.test(prefix) ||
+      (separatorPosition === 8 &&
+        /^([23456789CFGHJMPQRVWX]{2,})(0{2}|0{4}|0{6})$/i.test(prefix));
+    const validSuffix =
+      suffix.length >= 2 &&
+      suffix.length <= 7 &&
+      /^[23456789CFGHJMPQRVWX]+$/i.test(suffix);
+    const isFullCode = separatorPosition === 8;
+
+    if (
+      !validSeparator ||
+      !validPrefix ||
+      !validSuffix ||
+      (!isFullCode && !locality)
+    ) {
+      return {
+        kind: "invalid",
+        message: isFullCode
+          ? "El Plus Code no tiene un formato válido."
+          : "Introduce un Plus Code válido y añade la localidad si es corto.",
+      };
+    }
+
+    return {
+      kind: "plus-code",
+      value: locality ? `${code} ${locality}` : code,
+    };
+  }
+
+  return {
+    kind: "invalid",
+    message:
+      "Introduce coordenadas como latitud, longitud o un Plus Code válido.",
+  };
+};
+
+const isValidCoordinates = (
+  lat: number,
+  lng: number,
+): boolean =>
+  Number.isFinite(lat) &&
+  Number.isFinite(lng) &&
+  lat >= -90 &&
+  lat <= 90 &&
+  lng >= -180 &&
+  lng <= 180;
+
+const formatCoordinate = (value: number): string => {
+  const text = String(value);
+  if (!/[eE]/.test(text)) return text;
+
+  const [coefficient, exponentText] = text.toLowerCase().split("e");
+  const exponent = Number(exponentText);
+  const sign = coefficient.startsWith("-") ? "-" : "";
+  const unsignedCoefficient = sign ? coefficient.slice(1) : coefficient;
+  const decimalPosition =
+    (unsignedCoefficient.indexOf(".") < 0
+      ? unsignedCoefficient.length
+      : unsignedCoefficient.indexOf(".")) + exponent;
+  const digits = unsignedCoefficient.replace(".", "");
+
+  if (decimalPosition <= 0) {
+    return `${sign}0.${"0".repeat(-decimalPosition)}${digits}`;
+  }
+  if (decimalPosition >= digits.length) {
+    return `${sign}${digits}${"0".repeat(decimalPosition - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, decimalPosition)}.${digits.slice(decimalPosition)}`;
+};
 
 type AppModule = "home" | "routes" | "decas" | "billing";
 type BeforeInstallPromptEvent = Event & {
@@ -178,6 +288,8 @@ const App: React.FC = () => {
 
   const [newType, setNewType] = useState<DeliveryType>(DeliveryType.DELIVERY);
   const [isParsing, setIsParsing] = useState(false);
+  const deliverySaveInProgressRef = useRef(false);
+  const initialLocationInputRef = useRef("");
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
@@ -318,11 +430,9 @@ const App: React.FC = () => {
         { enableHighAccuracy: true },
       );
     }
-
     const SpeechRecognition =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
-
     if (SpeechRecognition) {
       const recognition = new SpeechRecognition();
       recognition.lang = "es-ES";
@@ -364,6 +474,7 @@ const App: React.FC = () => {
     setEditAddressInput("");
     setNewPhoneInput("");
     setNewCoordsInput("");
+    initialLocationInputRef.current = "";
     setEditNotesInput("");
     setNewType(DeliveryType.DELIVERY);
     setRouteNotice(null);
@@ -376,7 +487,15 @@ const App: React.FC = () => {
     setUnifiedInput(delivery.recipient);
     setEditAddressInput(delivery.address);
     setNewPhoneInput(delivery.phone ?? "");
-    setNewCoordsInput("");
+    const [lat, lng] = delivery.coordinates ?? [];
+    const initialLocationInput =
+      typeof lat === "number" &&
+      typeof lng === "number" &&
+      isValidCoordinates(lat, lng)
+        ? `${formatCoordinate(lat)}, ${formatCoordinate(lng)}`
+        : "";
+    setNewCoordsInput(initialLocationInput);
+    initialLocationInputRef.current = initialLocationInput;
     setEditNotesInput(delivery.notes ?? "");
     setNewType(delivery.type);
     setRouteNotice(null);
@@ -386,39 +505,73 @@ const App: React.FC = () => {
   const closeDeliveryForm = () => {
     setIsAdding(false);
     setEditingDelivery(null);
+    initialLocationInputRef.current = "";
   };
 
   const handleSaveDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingDelivery || isParsing) return;
+    if (!editingDelivery || deliverySaveInProgressRef.current) return;
 
+    const recipient = unifiedInput.trim();
     const address = editAddressInput.trim();
+    const locationInput = newCoordsInput.trim();
+    const locationInputChanged =
+      locationInput !== initialLocationInputRef.current;
     const addressChanged = address !== editingDelivery.address.trim();
+    const concept = conceptInput.trim() || undefined;
+    const phone = newPhoneInput.trim() || undefined;
+    const notes = editNotesInput.trim() || undefined;
+    const type = newType;
     let coordinates: [number, number] | undefined;
     let geocodingWarning: string | undefined;
+    let updateCoordinates = false;
 
+    deliverySaveInProgressRef.current = true;
     setIsParsing(true);
     setParsingMessage("Actualizando parada...");
 
     try {
-      if (addressChanged) {
+      if (locationInputChanged && locationInput) {
+        const parsedLocation = parseLocationInput(locationInput);
+        if (parsedLocation.kind === "invalid") {
+          setRouteNotice(parsedLocation.message);
+          return;
+        }
+
+        if (parsedLocation.kind === "coordinates") {
+          coordinates = parsedLocation.value;
+        } else if (parsedLocation.kind === "plus-code") {
+          try {
+            const geocoded = await geocodeAddress(parsedLocation.value);
+            if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
+              coordinates = [geocoded.lat, geocoded.lng];
+            } else {
+              setRouteNotice("Google no devolvió coordenadas válidas para el Plus Code.");
+              return;
+            }
+          } catch {
+            setRouteNotice("No se pudo resolver el Plus Code. No se guardaron los cambios.");
+            return;
+          }
+        }
+        updateCoordinates = true;
+      } else if (
+        addressChanged ||
+        (locationInputChanged && !locationInput && initialLocationInputRef.current)
+      ) {
+        updateCoordinates = true;
         if (address) {
           try {
             const geocoded = await geocodeAddress(address);
-            if (
-              Number.isFinite(geocoded.lat) &&
-              Number.isFinite(geocoded.lng)
-            ) {
+            if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
               coordinates = [geocoded.lat, geocoded.lng];
             } else {
               geocodingWarning =
-                "No se obtuvieron coordenadas válidas para la nueva dirección.";
+                "La parada se guardó, pero no se pudo localizar en el mapa.";
             }
-          } catch (error) {
+          } catch {
             geocodingWarning =
-              error instanceof Error
-                ? `No se pudo geocodificar la nueva dirección: ${error.message}`
-                : "No se pudo geocodificar la nueva dirección.";
+              "La parada se guardó, pero no se pudo localizar en el mapa.";
           }
         } else {
           geocodingWarning =
@@ -431,23 +584,24 @@ const App: React.FC = () => {
           delivery.id === editingDelivery.id
             ? {
                 ...delivery,
-                concept: conceptInput.trim() || undefined,
-                recipient: unifiedInput.trim(),
+                concept,
+                recipient,
                 address,
-                phone: newPhoneInput.trim() || undefined,
-                notes: editNotesInput.trim() || undefined,
-                type: newType,
-                ...(addressChanged && { coordinates }),
+                phone,
+                notes,
+                type,
+                ...(updateCoordinates && { coordinates }),
+                ...(updateCoordinates &&
+                  !coordinates && { sourceUrl: undefined }),
               }
             : delivery,
         ),
       );
 
-      if (geocodingWarning) {
-        setRouteNotice(geocodingWarning);
-      }
+      setRouteNotice(geocodingWarning ?? null);
       closeDeliveryForm();
     } finally {
+      deliverySaveInProgressRef.current = false;
       setIsParsing(false);
       setParsingMessage(null);
     }
@@ -459,51 +613,94 @@ const App: React.FC = () => {
       await handleSaveDelivery(e);
       return;
     }
-    if (isParsing) return;
+    if (deliverySaveInProgressRef.current) return;
 
-    const search = unifiedInput.trim();
-    const coords = newCoordsInput.trim();
-
-    if (!search && !coords) {
-      alert("Introduce algún dato de búsqueda o coordenadas.");
+    const recipient = unifiedInput.trim();
+    const address = editAddressInput.trim();
+    if (!recipient || !address) {
+      setRouteNotice(
+        !recipient && !address
+          ? "Introduce el destinatario y la dirección."
+          : !recipient
+            ? "Introduce el destinatario."
+            : "Introduce la dirección.",
+      );
       return;
     }
 
+    const coords = newCoordsInput.trim();
+    const parsedLocation = parseLocationInput(coords);
+    if (parsedLocation.kind === "invalid") {
+      setRouteNotice(parsedLocation.message);
+      return;
+    }
+
+    deliverySaveInProgressRef.current = true;
     setIsParsing(true);
-    setParsingMessage("Localizando destino...");
+    setParsingMessage("Creando parada...");
 
     try {
-      const parsed = await parseAddress(search, currentUserLoc, coords);
+      let coordinates: [number, number] | undefined;
+      let geocodingWarning: string | undefined;
 
-      const geocodingTarget = coords || parsed.address;
-
-      const geo = await geocodeAddress(geocodingTarget);
-      const lat = geo.lat;
-      const lng = geo.lng;
+      if (parsedLocation.kind === "coordinates") {
+        coordinates = parsedLocation.value;
+      } else if (parsedLocation.kind === "plus-code") {
+        try {
+          const geocoded = await geocodeAddress(parsedLocation.value);
+          if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
+            coordinates = [geocoded.lat, geocoded.lng];
+          } else {
+            setRouteNotice("Google no devolvió coordenadas válidas para el Plus Code.");
+            return;
+          }
+        } catch {
+          setRouteNotice(
+            "No se pudo resolver el Plus Code. Revisa el código y la localidad; no se creó la parada.",
+          );
+          return;
+        }
+      } else {
+        try {
+          const geocodedAddress = await geocodeAddress(address);
+          if (isValidCoordinates(geocodedAddress.lat, geocodedAddress.lng)) {
+            coordinates = [geocodedAddress.lat, geocodedAddress.lng];
+          } else {
+            geocodingWarning =
+              "La parada se ha creado, pero no se pudo localizar en el mapa.";
+          }
+        } catch {
+          geocodingWarning =
+            "La parada se ha creado, pero no se pudo localizar en el mapa.";
+        }
+      }
 
       const newDelivery: Delivery = {
         id: Math.random().toString(36).substring(2, 9),
         concept: conceptInput.trim() || undefined,
-        recipient: search,
-        address: parsed.address,
-        phone: newPhoneInput.trim() || parsed.phone || "",
-        coordinates: [lat, lng],
+        recipient,
+        address,
+        phone: newPhoneInput.trim() || "",
+        coordinates,
         status: DeliveryStatus.PENDING,
         type: newType,
-        sourceUrl: parsed.sourceUrl || coords || undefined,
+        sourceUrl: coords || undefined,
         estimatedTime: `~${Math.floor(Math.random() * 3) + 1} h`,
+        notes: editNotesInput.trim() || undefined,
       };
 
       setDeliveries((prev) => [...prev, newDelivery]);
+      setRouteNotice(geocodingWarning || null);
       setConceptInput("");
       setUnifiedInput("");
+      setEditAddressInput("");
       setNewPhoneInput("");
       setNewCoordsInput("");
-      setIsAdding(false);
+      setEditNotesInput("");
+      closeDeliveryForm();
       setSelectedId(newDelivery.id);
-    } catch (error: any) {
-      alert("Error: " + (error?.message || "Error desconocido"));
     } finally {
+      deliverySaveInProgressRef.current = false;
       setIsParsing(false);
       setParsingMessage(null);
     }
@@ -1336,7 +1533,8 @@ const App: React.FC = () => {
                   <button
                     type="button"
                     onClick={closeDeliveryForm}
-                    className="p-2 hover:bg-slate-200 rounded-xl"
+                    disabled={isParsing}
+                    className="p-2 hover:bg-slate-200 rounded-xl disabled:opacity-50"
                   >
                     <X size={24} />
                   </button>
@@ -1350,6 +1548,7 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setNewType(DeliveryType.DELIVERY)}
+                      disabled={isParsing}
                       className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
                         newType === DeliveryType.DELIVERY
                           ? "bg-blue-600 text-white shadow-lg"
@@ -1361,6 +1560,7 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setNewType(DeliveryType.PICKUP)}
+                      disabled={isParsing}
                       className={`flex-1 py-3 rounded-2xl text-[10px] font-black ${
                         newType === DeliveryType.PICKUP
                           ? "bg-red-600 text-white shadow-lg"
@@ -1371,59 +1571,43 @@ const App: React.FC = () => {
                     </button>
                   </div>
 
-                  {editingDelivery ? (
-                    <>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                          Destinatario
-                        </label>
-                        <textarea
-                          value={unifiedInput}
-                          onChange={(e) => setUnifiedInput(e.target.value)}
-                          className="w-full h-20 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                          Dirección
-                        </label>
-                        <textarea
-                          value={editAddressInput}
-                          onChange={(e) => setEditAddressInput(e.target.value)}
-                          className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                        Nombre, Comercio o Dirección
-                      </label>
-                      <div className="relative">
-                        <MapPin
-                          className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
-                          size={20}
-                        />
-                        <textarea
-                          value={unifiedInput}
-                          onChange={(e) => setUnifiedInput(e.target.value)}
-                          className="w-full h-28 pl-12 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
-                          placeholder="Ej: Pacal Shoes Elche o Calle Mayor 10"
-                        />
-                        <button
-                          type="button"
-                          onClick={toggleListening}
-                          className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
-                            isListening
-                              ? "bg-red-500 text-white animate-pulse"
-                              : "bg-slate-100 text-slate-400"
-                          }`}
-                        >
-                          <Mic size={18} />
-                        </button>
-                      </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                      Destinatario
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        value={unifiedInput}
+                        onChange={(e) => setUnifiedInput(e.target.value)}
+                        disabled={isParsing}
+                        className="w-full h-20 px-4 pr-14 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={toggleListening}
+                        disabled={isParsing}
+                        className={`absolute right-2 bottom-2 p-2.5 rounded-xl ${
+                          isListening
+                            ? "bg-red-500 text-white animate-pulse"
+                            : "bg-slate-100 text-slate-400"
+                        }`}
+                        aria-label="Dictar destinatario"
+                      >
+                        <Mic size={18} />
+                      </button>
                     </div>
-                  )}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                      Dirección
+                    </label>
+                    <textarea
+                      value={editAddressInput}
+                      onChange={(e) => setEditAddressInput(e.target.value)}
+                      disabled={isParsing}
+                      className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
+                    />
+                  </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
@@ -1439,30 +1623,34 @@ const App: React.FC = () => {
                           type="tel"
                           value={newPhoneInput}
                           onChange={(e) => setNewPhoneInput(e.target.value)}
+                          disabled={isParsing}
                           className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
                         />
                       </div>
                     </div>
-                    {!editingDelivery && (
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                          Coordenadas / Plus Code
-                        </label>
-                        <div className="relative">
-                          <MapPin
-                            className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300"
-                            size={16}
-                          />
-                          <input
-                            type="text"
-                            value={newCoordsInput}
-                            onChange={(e) => setNewCoordsInput(e.target.value)}
-                            className="w-full pl-10 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs"
-                            placeholder="Ej: 38.26,-0.70 o 76R3+5C Elche"
-                          />
-                        </div>
-                      </div>
-                    )}
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                        Coordenadas / Plus Code
+                      </label>
+                      <input
+                        type="text"
+                        value={newCoordsInput}
+                        onChange={(e) => setNewCoordsInput(e.target.value)}
+                        disabled={isParsing}
+                        className="w-full px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs disabled:bg-slate-50"
+                        placeholder="38.3452, -0.4810 o 849VCWC8+R9"
+                      />
+                      <p className="px-2 text-[10px] leading-relaxed text-slate-500">
+                        Opcional. Coordenadas: latitud, longitud, con punto
+                        decimal. Para un Plus Code corto, añade la localidad.
+                      </p>
+                      {editingDelivery && (
+                        <p className="px-2 text-[10px] leading-relaxed text-slate-500">
+                          Si borras una ubicación guardada, se volverá a
+                          localizar la parada por dirección.
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   <div className="space-y-2">
@@ -1478,42 +1666,45 @@ const App: React.FC = () => {
                         type="text"
                         value={conceptInput}
                         onChange={(e) => setConceptInput(e.target.value)}
+                        disabled={isParsing}
                         className="w-full pl-12 pr-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold"
                       />
                     </div>
                   </div>
 
-                  {editingDelivery && (
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                        Notas
-                      </label>
-                      <textarea
-                        value={editNotesInput}
-                        onChange={(e) => setEditNotesInput(e.target.value)}
-                        className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-sm resize-none"
-                      />
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
+                      Notas
+                    </label>
+                    <textarea
+                      value={editNotesInput}
+                      onChange={(e) => setEditNotesInput(e.target.value)}
+                      disabled={isParsing}
+                      className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-sm resize-none"
+                    />
+                  </div>
+
+                  {routeNotice && (
+                    <div
+                      role="status"
+                      className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+                    >
+                      {routeNotice}
                     </div>
                   )}
 
-                  {editingDelivery && (
-                    <button
-                      type="button"
-                      onClick={closeDeliveryForm}
-                      className="w-full py-4 bg-slate-100 text-slate-700 rounded-[30px] font-black uppercase hover:bg-slate-200"
-                    >
-                      Cancelar
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={closeDeliveryForm}
+                    disabled={isParsing}
+                    className="w-full py-4 bg-slate-100 text-slate-700 rounded-[30px] font-black uppercase hover:bg-slate-200 disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
 
                   <button
                     type="submit"
-                    disabled={
-                      isParsing ||
-                      (!editingDelivery &&
-                        !unifiedInput.trim() &&
-                        !newCoordsInput.trim())
-                    }
+                    disabled={isParsing}
                     className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4"
                   >
                     {isParsing ? (
@@ -1526,7 +1717,7 @@ const App: React.FC = () => {
                     ) : (
                       editingDelivery ? null : <Plus size={24} />
                     )}
-                    {editingDelivery ? "Guardar cambios" : "Añadir Parada"}
+                    {editingDelivery ? "Guardar cambios" : "Crear parada"}
                   </button>
                 </form>
               </div>
