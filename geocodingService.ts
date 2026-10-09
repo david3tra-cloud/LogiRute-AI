@@ -1,9 +1,20 @@
-// geocodingService.ts
+import { isGoogleMapsUrl } from "./mapsUrlService";
 
 const GEOCODING_API_KEY = import.meta.env.VITE_GOOGLE_GEOCODING_KEY;
 
 // Solo sesgo por país
 const DEFAULT_REGION = "es";
+
+function isUrlFormattedInput(input: string): boolean {
+  const trimmed = input.trim();
+  return (
+    /^[a-z][a-z\d+.-]*:/i.test(trimmed) ||
+    /^www\./i.test(trimmed) ||
+    /^[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+(?:[/:?#]|$)/i.test(
+      trimmed,
+    )
+  );
+}
 
 if (!GEOCODING_API_KEY) {
   console.warn(
@@ -11,30 +22,18 @@ if (!GEOCODING_API_KEY) {
   );
 }
 
-// Intenta extraer coordenadas lat,lng de un string
+// Intenta extraer coordenadas lat,lng de un string formato simple "lat,lng"
 function parseLatLng(input: string): { lat: number; lng: number } | null {
   const trimmed = input.trim();
 
-  // 1) Formato simple "lat,lng"
+  // Formato simple "lat,lng"
   const simpleMatch = trimmed.match(
     /^(-?\d+(\.\d+)?)\s*,\s*(-?\d+(\.\d+)?)$/
   );
   if (simpleMatch) {
     const lat = parseFloat(simpleMatch[1]);
     const lng = parseFloat(simpleMatch[3]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
-      return { lat, lng };
-    }
-  }
-
-  // 2) Coordenadas dentro de una URL (ej: .../@38.2695,-0.6987,17z/...)
-  const urlMatch = trimmed.match(
-    /@(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)/ // @lat,lng
-  );
-  if (urlMatch) {
-    const lat = parseFloat(urlMatch[1]);
-    const lng = parseFloat(urlMatch[3]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+    if (!Number.isNaN(lat) && !Number.isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
       return { lat, lng };
     }
   }
@@ -43,21 +42,24 @@ function parseLatLng(input: string): { lat: number; lng: number } | null {
 }
 
 export async function geocodeAddress(address: string) {
+  if (isGoogleMapsUrl(address) || isUrlFormattedInput(address)) {
+    throw new Error(
+      "No se pueden enviar URLs a geocodificar como dirección. Introduce una dirección de texto o un Plus Code; para enlaces de Maps, usa el campo de coordenadas o enlace de Maps."
+    );
+  }
+
   if (!GEOCODING_API_KEY) {
     throw new Error(
       "Falta la clave de Google Geocoding (VITE_GOOGLE_GEOCODING_KEY)."
     );
   }
 
-  // 1) Si el usuario ha puesto coordenadas o una URL con coordenadas,
-  // las usamos directamente y evitamos llamar a la API.
+  // 1) Si el usuario ha puesto coordenadas directas, las usamos y evitamos llamar a la API.
   const directCoords = parseLatLng(address);
   if (directCoords) {
     return directCoords;
   }
 
-  // 2) Si es un enlace de Maps sin coordenadas claras (Plus Code, etc.),
-  // usamos el texto completo como address para Geocoding.
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
     address
   )}&key=${GEOCODING_API_KEY}&region=${DEFAULT_REGION}`;

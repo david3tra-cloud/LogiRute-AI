@@ -47,6 +47,14 @@ import {
   sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 
+import {
+  extractDestinationFromMapsUrl,
+  isGoogleMapsUrl,
+  isMapsShortUrl,
+  resolveGoogleMapsUrl,
+  validateMapsUrl,
+} from "./mapsUrlService";
+
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
 const SEQUENCE_KEY = "logiroute_sequence_v1";
@@ -57,6 +65,8 @@ type ParsedLocationInput =
   | { kind: "empty" }
   | { kind: "coordinates"; value: [number, number] }
   | { kind: "plus-code"; value: string }
+  | { kind: "maps-short-url"; url: string }
+  | { kind: "maps-long-url"; url: string; coordinates: [number, number] }
   | { kind: "invalid"; message: string };
 
 const parseLocationInput = (input: string): ParsedLocationInput => {
@@ -123,10 +133,42 @@ const parseLocationInput = (input: string): ParsedLocationInput => {
     };
   }
 
+  if (
+    value.startsWith("http://") ||
+    value.startsWith("https://") ||
+    /^maps\.app\.goo\.gl/i.test(value) ||
+    isGoogleMapsUrl(value)
+  ) {
+    try {
+      const validated = validateMapsUrl(value);
+      const normalizedUrl = validated.toString();
+      if (isMapsShortUrl(normalizedUrl)) {
+        return { kind: "maps-short-url", url: normalizedUrl };
+      }
+      const dest = extractDestinationFromMapsUrl(normalizedUrl);
+      if (dest.kind === "coordinates") {
+        return {
+          kind: "maps-long-url",
+          url: normalizedUrl,
+          coordinates: dest.coordinates,
+        };
+      }
+      return { kind: "invalid", message: dest.message };
+    } catch (err) {
+      return {
+        kind: "invalid",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Enlace de Google Maps no válido.",
+      };
+    }
+  }
+
   return {
     kind: "invalid",
     message:
-      "Introduce coordenadas como latitud, longitud o un Plus Code válido.",
+      "Introduce coordenadas como latitud, longitud, un Plus Code válido o un enlace de Google Maps.",
   };
 };
 
@@ -285,10 +327,14 @@ const App: React.FC = () => {
   const [newCoordsInput, setNewCoordsInput] = useState("");
   const [editNotesInput, setEditNotesInput] = useState("");
   const [routeNotice, setRouteNotice] = useState<string | null>(null);
+  const [isResolvingMapsUrl, setIsResolvingMapsUrl] = useState(false);
+  const [mapsSourceUrl, setMapsSourceUrl] = useState<string | undefined>();
 
   const [newType, setNewType] = useState<DeliveryType>(DeliveryType.DELIVERY);
   const [isParsing, setIsParsing] = useState(false);
   const deliverySaveInProgressRef = useRef(false);
+  const mapsResolveRequestRef = useRef(0);
+  const mapsResolutionInProgressRef = useRef(false);
   const initialLocationInputRef = useRef("");
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
@@ -467,7 +513,15 @@ const App: React.FC = () => {
     if (error) alert("No se pudo cerrar la sesión. Inténtalo de nuevo.");
   };
 
+  const invalidateMapsResolution = () => {
+    mapsResolveRequestRef.current++;
+    mapsResolutionInProgressRef.current = false;
+    setIsResolvingMapsUrl(false);
+    setMapsSourceUrl(undefined);
+  };
+
   const openAddDelivery = () => {
+    invalidateMapsResolution();
     setEditingDelivery(null);
     setConceptInput("");
     setUnifiedInput("");
@@ -482,7 +536,9 @@ const App: React.FC = () => {
   };
 
   const openEditDelivery = (delivery: Delivery) => {
+    invalidateMapsResolution();
     setEditingDelivery(delivery);
+    setMapsSourceUrl(delivery.sourceUrl);
     setConceptInput(delivery.concept ?? "");
     setUnifiedInput(delivery.recipient);
     setEditAddressInput(delivery.address);
@@ -503,14 +559,63 @@ const App: React.FC = () => {
   };
 
   const closeDeliveryForm = () => {
+    invalidateMapsResolution();
     setIsAdding(false);
     setEditingDelivery(null);
     initialLocationInputRef.current = "";
   };
 
+  const handleResolveMapsInput = async () => {
+    const input = newCoordsInput.trim();
+    if (!input || mapsResolutionInProgressRef.current) {
+      if (!input) setRouteNotice("Introduce un enlace de Google Maps para resolver.");
+      return;
+    }
+
+    const requestId = ++mapsResolveRequestRef.current;
+    mapsResolutionInProgressRef.current = true;
+    try {
+      setIsResolvingMapsUrl(true);
+      setRouteNotice(null);
+      const validated = validateMapsUrl(input);
+      let targetUrl = validated.toString();
+      if (isMapsShortUrl(targetUrl)) {
+        targetUrl = await resolveGoogleMapsUrl(targetUrl);
+      }
+      if (requestId !== mapsResolveRequestRef.current) return;
+      const dest = extractDestinationFromMapsUrl(targetUrl);
+      if (dest.kind === "coordinates") {
+        const [lat, lng] = dest.coordinates;
+        setNewCoordsInput(`${formatCoordinate(lat)}, ${formatCoordinate(lng)}`);
+        setMapsSourceUrl(input);
+        setRouteNotice(
+          `Ubicación resuelta: ${formatCoordinate(lat)}, ${formatCoordinate(lng)}. Revisa los datos y guarda.`
+        );
+      } else {
+        setRouteNotice(dest.message);
+      }
+    } catch (err) {
+      if (requestId !== mapsResolveRequestRef.current) return;
+      setRouteNotice(
+        err instanceof Error
+          ? err.message
+          : "No se pudo resolver el enlace de Google Maps."
+      );
+    } finally {
+      if (requestId === mapsResolveRequestRef.current) {
+        mapsResolutionInProgressRef.current = false;
+        setIsResolvingMapsUrl(false);
+      }
+    }
+  };
+
   const handleSaveDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingDelivery || deliverySaveInProgressRef.current) return;
+    if (
+      !editingDelivery ||
+      deliverySaveInProgressRef.current ||
+      mapsResolutionInProgressRef.current
+    ) return;
 
     const recipient = unifiedInput.trim();
     const address = editAddressInput.trim();
@@ -525,6 +630,7 @@ const App: React.FC = () => {
     let coordinates: [number, number] | undefined;
     let geocodingWarning: string | undefined;
     let updateCoordinates = false;
+    let sourceUrl = mapsSourceUrl;
 
     deliverySaveInProgressRef.current = true;
     setIsParsing(true);
@@ -540,7 +646,31 @@ const App: React.FC = () => {
 
         if (parsedLocation.kind === "coordinates") {
           coordinates = parsedLocation.value;
+        } else if (parsedLocation.kind === "maps-long-url") {
+          coordinates = parsedLocation.coordinates;
+          sourceUrl = locationInput;
+        } else if (parsedLocation.kind === "maps-short-url") {
+          sourceUrl = locationInput;
+          setParsingMessage("Resolviendo enlace de Google Maps...");
+          try {
+            const resolvedUrl = await resolveGoogleMapsUrl(parsedLocation.url);
+            const dest = extractDestinationFromMapsUrl(resolvedUrl);
+            if (dest.kind === "coordinates") {
+              coordinates = dest.coordinates;
+            } else {
+              setRouteNotice(dest.message);
+              return;
+            }
+          } catch (err: unknown) {
+            setRouteNotice(
+              err instanceof Error
+                ? err.message
+                : "No se pudo resolver el enlace de Google Maps.",
+            );
+            return;
+          }
         } else if (parsedLocation.kind === "plus-code") {
+          sourceUrl = undefined;
           try {
             const geocoded = await geocodeAddress(parsedLocation.value);
             if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
@@ -559,8 +689,15 @@ const App: React.FC = () => {
         addressChanged ||
         (locationInputChanged && !locationInput && initialLocationInputRef.current)
       ) {
+        sourceUrl = undefined;
         updateCoordinates = true;
         if (address) {
+          if (isGoogleMapsUrl(address)) {
+            setRouteNotice(
+              "Pega los enlaces de Google Maps en el campo de Coordenadas / Enlace de Maps, no en la dirección.",
+            );
+            return;
+          }
           try {
             const geocoded = await geocodeAddress(address);
             if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
@@ -591,8 +728,9 @@ const App: React.FC = () => {
                 notes,
                 type,
                 ...(updateCoordinates && { coordinates }),
-                ...(updateCoordinates &&
-                  !coordinates && { sourceUrl: undefined }),
+                ...((updateCoordinates || sourceUrl !== editingDelivery.sourceUrl) && {
+                  sourceUrl,
+                }),
               }
             : delivery,
         ),
@@ -609,6 +747,7 @@ const App: React.FC = () => {
 
   const handleAddDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (mapsResolutionInProgressRef.current) return;
     if (editingDelivery) {
       await handleSaveDelivery(e);
       return;
@@ -616,14 +755,15 @@ const App: React.FC = () => {
     if (deliverySaveInProgressRef.current) return;
 
     const recipient = unifiedInput.trim();
+    if (!recipient) {
+      setRouteNotice("Introduce el destinatario.");
+      return;
+    }
+
     const address = editAddressInput.trim();
-    if (!recipient || !address) {
+    if (address && isGoogleMapsUrl(address)) {
       setRouteNotice(
-        !recipient && !address
-          ? "Introduce el destinatario y la dirección."
-          : !recipient
-            ? "Introduce el destinatario."
-            : "Introduce la dirección.",
+        "Pega los enlaces de Google Maps en el campo de Coordenadas / Enlace de Maps, no en la dirección.",
       );
       return;
     }
@@ -635,6 +775,13 @@ const App: React.FC = () => {
       return;
     }
 
+    if (parsedLocation.kind === "empty" && !address) {
+      setRouteNotice(
+        "Introduce una dirección o unas coordenadas / Plus Code válidos.",
+      );
+      return;
+    }
+
     deliverySaveInProgressRef.current = true;
     setIsParsing(true);
     setParsingMessage("Creando parada...");
@@ -642,10 +789,35 @@ const App: React.FC = () => {
     try {
       let coordinates: [number, number] | undefined;
       let geocodingWarning: string | undefined;
+      let sourceUrl = mapsSourceUrl;
 
       if (parsedLocation.kind === "coordinates") {
         coordinates = parsedLocation.value;
+      } else if (parsedLocation.kind === "maps-long-url") {
+        coordinates = parsedLocation.coordinates;
+        sourceUrl = coords;
+      } else if (parsedLocation.kind === "maps-short-url") {
+        sourceUrl = coords;
+        setParsingMessage("Resolviendo enlace de Google Maps...");
+        try {
+          const resolvedUrl = await resolveGoogleMapsUrl(parsedLocation.url);
+          const dest = extractDestinationFromMapsUrl(resolvedUrl);
+          if (dest.kind === "coordinates") {
+            coordinates = dest.coordinates;
+          } else {
+            setRouteNotice(dest.message);
+            return;
+          }
+        } catch (err: unknown) {
+          setRouteNotice(
+            err instanceof Error
+              ? err.message
+              : "No se pudo resolver el enlace de Google Maps.",
+          );
+          return;
+        }
       } else if (parsedLocation.kind === "plus-code") {
+        sourceUrl = undefined;
         try {
           const geocoded = await geocodeAddress(parsedLocation.value);
           if (isValidCoordinates(geocoded.lat, geocoded.lng)) {
@@ -660,7 +832,8 @@ const App: React.FC = () => {
           );
           return;
         }
-      } else {
+      } else if (address) {
+        sourceUrl = undefined;
         try {
           const geocodedAddress = await geocodeAddress(address);
           if (isValidCoordinates(geocodedAddress.lat, geocodedAddress.lng)) {
@@ -684,7 +857,7 @@ const App: React.FC = () => {
         coordinates,
         status: DeliveryStatus.PENDING,
         type: newType,
-        sourceUrl: coords || undefined,
+        sourceUrl,
         estimatedTime: `~${Math.floor(Math.random() * 3) + 1} h`,
         notes: editNotesInput.trim() || undefined,
       };
@@ -1340,7 +1513,7 @@ const App: React.FC = () => {
                       </h2>
                       <div className="flex items-center gap-2 mt-1">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          Versión Groq 1.0
+                          Rutas · Gestión local
                         </p>
                       </div>
                     </div>
@@ -1607,6 +1780,9 @@ const App: React.FC = () => {
                       disabled={isParsing}
                       className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
                     />
+                    <p className="px-2 text-[10px] leading-relaxed text-slate-500">
+                      La dirección es opcional si introduces coordenadas válidas o un Plus Code que pueda localizarse.
+                    </p>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1629,20 +1805,34 @@ const App: React.FC = () => {
                       </div>
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">
-                        Coordenadas / Plus Code
-                      </label>
+                      <div className="flex items-center justify-between ml-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                          Coordenadas / Plus Code / Enlace de Maps
+                        </label>
+                        {isGoogleMapsUrl(newCoordsInput) && (
+                          <button
+                            type="button"
+                            onClick={handleResolveMapsInput}
+                            disabled={isParsing || isResolvingMapsUrl}
+                            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                          >
+                            {isResolvingMapsUrl ? "Resolviendo..." : "Resolver enlace"}
+                          </button>
+                        )}
+                      </div>
                       <input
                         type="text"
                         value={newCoordsInput}
-                        onChange={(e) => setNewCoordsInput(e.target.value)}
-                        disabled={isParsing}
+                        onChange={(e) => {
+                          setNewCoordsInput(e.target.value);
+                          setMapsSourceUrl(undefined);
+                        }}
+                        disabled={isParsing || isResolvingMapsUrl}
                         className="w-full px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 text-xs disabled:bg-slate-50"
-                        placeholder="38.3452, -0.4810 o 849VCWC8+R9"
+                        placeholder="38.3452, -0.4810, Plus Code o enlace de Maps"
                       />
                       <p className="px-2 text-[10px] leading-relaxed text-slate-500">
-                        Opcional. Coordenadas: latitud, longitud, con punto
-                        decimal. Para un Plus Code corto, añade la localidad.
+                        Opcional. Coordenadas: latitud, longitud. Plus Code o enlace de Google Maps (maps.app.goo.gl).
                       </p>
                       {editingDelivery && (
                         <p className="px-2 text-[10px] leading-relaxed text-slate-500">
@@ -1704,7 +1894,7 @@ const App: React.FC = () => {
 
                   <button
                     type="submit"
-                    disabled={isParsing}
+                    disabled={isParsing || isResolvingMapsUrl}
                     className="w-full py-5 bg-blue-600 text-white rounded-[30px] font-black text-lg flex justify-center items-center gap-4 shadow-xl hover:bg-blue-700 disabled:opacity-50 uppercase mt-4"
                   >
                     {isParsing ? (
