@@ -616,22 +616,23 @@ const App: React.FC = () => {
     if (deliverySaveInProgressRef.current) return;
 
     const recipient = unifiedInput.trim();
-    const address = editAddressInput.trim();
-    if (!recipient || !address) {
-      setRouteNotice(
-        !recipient && !address
-          ? "Introduce el destinatario y la dirección."
-          : !recipient
-            ? "Introduce el destinatario."
-            : "Introduce la dirección.",
-      );
+    if (!recipient) {
+      setRouteNotice("Introduce el destinatario.");
       return;
     }
 
+    const address = editAddressInput.trim();
     const coords = newCoordsInput.trim();
     const parsedLocation = parseLocationInput(coords);
     if (parsedLocation.kind === "invalid") {
       setRouteNotice(parsedLocation.message);
+      return;
+    }
+
+    if (parsedLocation.kind === "empty" && !address) {
+      setRouteNotice(
+        "Introduce una dirección o unas coordenadas / Plus Code válidos.",
+      );
       return;
     }
 
@@ -660,7 +661,7 @@ const App: React.FC = () => {
           );
           return;
         }
-      } else {
+      } else if (address) {
         try {
           const geocodedAddress = await geocodeAddress(address);
           if (isValidCoordinates(geocodedAddress.lat, geocodedAddress.lng)) {
@@ -1340,7 +1341,7 @@ const App: React.FC = () => {
                       </h2>
                       <div className="flex items-center gap-2 mt-1">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          Versión Groq 1.0
+                          Rutas · Gestión local
                         </p>
                       </div>
                     </div>
@@ -1607,6 +1608,9 @@ const App: React.FC = () => {
                       disabled={isParsing}
                       className="w-full h-24 px-4 py-4 border-2 border-slate-100 rounded-2xl outline-none focus:border-blue-500 font-bold text-sm resize-none"
                     />
+                    <p className="px-2 text-[10px] leading-relaxed text-slate-500">
+                      La dirección es opcional si introduces coordenadas válidas o un Plus Code que pueda localizarse.
+                    </p>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

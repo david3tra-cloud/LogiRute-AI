@@ -139,15 +139,19 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     return googleMapsRegex.test(url);
   };
 
+  const [lat, lng] = delivery.coordinates || [];
+
+  const hasValidCoords =
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    !Number.isNaN(lat) &&
+    !Number.isNaN(lng);
+
+  const displayAddress =
+    delivery.address?.trim() ||
+    (hasValidCoords ? 'Ubicación por coordenadas' : '');
+
   const buildNavigationUrl = (): string => {
-    const [lat, lng] = delivery.coordinates || [];
-
-    const hasValidCoords =
-      typeof lat === 'number' &&
-      typeof lng === 'number' &&
-      !Number.isNaN(lat) &&
-      !Number.isNaN(lng);
-
     // PRIORIDAD TOTAL a coordenadas:
     // así evitamos errores típicos con Plus Codes como "7733+WG La Peña..."
     if (hasValidCoords) {
@@ -246,7 +250,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
               </div>
               <div className="flex items-center gap-1 text-[11px] text-slate-500 mt-0.5">
                 <MapPin size={12} className="shrink-0" />
-                <p className="truncate opacity-80">{delivery.address}</p>
+                <p className="truncate opacity-80">{displayAddress}</p>
               </div>
             </div>
           </div>
