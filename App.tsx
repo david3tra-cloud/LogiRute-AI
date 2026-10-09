@@ -51,7 +51,6 @@ import {
   extractDestinationFromMapsUrl,
   isGoogleMapsUrl,
   isMapsShortUrl,
-  normalizePotentialUrl,
   resolveGoogleMapsUrl,
   validateMapsUrl,
 } from "./mapsUrlService";

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
+import { isValidCoordinatePair } from './mapsUrlService';
 import {
   CheckCircle,
   Clock,
@@ -144,8 +145,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
   const hasValidCoords =
     typeof lat === 'number' &&
     typeof lng === 'number' &&
-    !Number.isNaN(lat) &&
-    !Number.isNaN(lng);
+    isValidCoordinatePair(lat, lng);
 
   const displayAddress =
     delivery.address?.trim() ||

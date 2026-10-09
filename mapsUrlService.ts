@@ -136,9 +136,19 @@ export function extractDestinationFromMapsUrl(urlStr: string): DestinationResult
   }
 
   // 2. Revisar ruta explícita /maps/place/lat,lng o /maps/search/lat,lng
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname);
+  } catch {
+    return {
+      kind: "ambiguous",
+      message: "La ruta del enlace contiene una codificación no válida.",
+    };
+  }
+
   const pathMatches = Array.from(
-    parsed.pathname.matchAll(
-      /\/maps\/(?:place|search)\/([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))/gi
+    decodedPath.matchAll(
+      /\/maps\/(?:place|search)\/([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(?=\/|$)/gi
     ),
   );
   for (const pathMatch of pathMatches) {
