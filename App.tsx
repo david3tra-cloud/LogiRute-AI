@@ -1439,15 +1439,32 @@ const App: React.FC = () => {
           )}
 
           {/* HEADER */}
-          <header className="bg-white border-b px-3 py-2 flex items-center justify-between gap-2 z-30 shadow-sm">
-            <div className="flex items-center gap-2 min-w-0">
-              <Truck className="text-blue-600 shrink-0" size={22} />
-              <h1 className="text-lg font-black tracking-tighter truncate">
-                LOGIROUTE <span className="text-blue-600">AI</span>
-              </h1>
-            </div>
-
-            <div className="flex flex-col items-end gap-1">
+          <header className="bg-white border-b px-3 py-2 flex flex-wrap items-center justify-between gap-2 z-30 shadow-sm">
+            <button
+              type="button"
+              onClick={handleToggleEditingLocked}
+              disabled={isAdding || editingDelivery !== null}
+              aria-pressed={editingLocked}
+              title={
+                editingLocked
+                  ? "Desbloquear edición de la ruta"
+                  : "Bloquear edición de la ruta"
+              }
+              className={`px-2.5 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md transition disabled:opacity-40 shrink-0 ${
+                editingLocked
+                  ? "bg-amber-500 text-white hover:bg-amber-600"
+                  : "bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              {editingLocked ? <Lock size={14} /> : <Unlock size={14} />}
+              <span className="sm:hidden">
+                {editingLocked ? "Desbloquear" : "Bloquear"}
+              </span>
+              <span className="hidden sm:inline">
+                {editingLocked ? "Desbloquear edición" : "Bloquear edición"}
+              </span>
+            </button>
+            <div className="flex flex-col items-end gap-1 ml-auto">
               <div className="flex bg-slate-100 rounded-xl p-1 text-[9px] sm:text-[10px]">
                 {["list", "map", "split", "control"].map((mode) => (
                   <button
@@ -1465,25 +1482,6 @@ const App: React.FC = () => {
               </div>
 
               <div className="hidden sm:flex flex-wrap items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={handleToggleEditingLocked}
-                  disabled={isAdding || editingDelivery !== null}
-                  aria-pressed={editingLocked}
-                  title={
-                    editingLocked
-                      ? "Desbloquear edición de la ruta"
-                      : "Bloquear edición de la ruta"
-                  }
-                  className={`px-3 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md transition disabled:opacity-40 ${
-                    editingLocked
-                      ? "bg-amber-500 text-white hover:bg-amber-600"
-                      : "bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
-                  }`}
-                >
-                  {editingLocked ? <Lock size={14} /> : <Unlock size={14} />}
-                  {editingLocked ? "Desbloquear edición" : "Bloquear edición"}
-                </button>
                 <button
                   onClick={openAddDelivery}
                   className="bg-blue-600 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md hover:bg-blue-700 transition"
@@ -1516,25 +1514,6 @@ const App: React.FC = () => {
 
           {/* barra acciones móvil */}
           <div className="sm:hidden bg-white border-b px-3 py-2 flex flex-wrap items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={handleToggleEditingLocked}
-              disabled={isAdding || editingDelivery !== null}
-              aria-pressed={editingLocked}
-              title={
-                editingLocked
-                  ? "Desbloquear edición de la ruta"
-                  : "Bloquear edición de la ruta"
-              }
-              className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md transition disabled:opacity-40 ${
-                editingLocked
-                  ? "bg-amber-500 text-white"
-                  : "bg-white text-slate-500 border border-slate-200"
-              }`}
-            >
-              {editingLocked ? <Lock size={12} /> : <Unlock size={12} />}
-              {editingLocked ? "Desbloquear" : "Bloquear"}
-            </button>
             <button
               onClick={openAddDelivery}
               className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md"
@@ -1595,20 +1574,6 @@ const App: React.FC = () => {
                           Rutas · Gestión local
                         </p>
                       </div>
-                    </div>
-                    <div className="flex gap-4">
-                      <button
-                        type="button"
-                        className="bg-slate-900 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-slate-800 transition-all uppercase text-xs"
-                      >
-                        REGISTRO
-                      </button>
-                      <button
-                        onClick={handleClearAll}
-                        className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
-                      >
-                        <Power size={20} /> Cerrar jornada
-                      </button>
                     </div>
                   </div>
 
@@ -1677,6 +1642,21 @@ const App: React.FC = () => {
                         {pendingCount}
                       </span>
                     </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-4">
+                    <button
+                      type="button"
+                      className="bg-slate-900 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-slate-800 transition-all uppercase text-xs"
+                    >
+                      REGISTRO
+                    </button>
+                    <button
+                      onClick={handleClearAll}
+                      className="bg-red-600 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-red-700 transition-all uppercase text-xs"
+                    >
+                      <Power size={20} /> Cerrar jornada
+                    </button>
                   </div>
                 </div>
               </div>
