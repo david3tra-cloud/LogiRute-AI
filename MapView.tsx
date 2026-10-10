@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef } from 'react';
 import L from 'leaflet';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
 
@@ -9,6 +9,7 @@ interface MapViewProps {
   onMarkerClick: (id: string, forceExpand?: boolean) => void;
   viewMode: string;
   onMarkerDragEnd: (id: string, coords: [number, number]) => void;
+  editingLocked: boolean;
 }
 
 const MapView: React.FC<MapViewProps> = ({
@@ -18,9 +19,34 @@ const MapView: React.FC<MapViewProps> = ({
   onMarkerClick,
   viewMode,
   onMarkerDragEnd,
+  editingLocked,
 }) => {
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
+  const editingLockedRef = useRef(false);
+
+  // useLayoutEffect corre antes de los efectos pasivos de creación/
+  // actualización de marcadores: la ref queda sincronizada a tiempo.
+  // Solo se aplica enable/disable a los marcadores existentes; NO se
+  // recrean ni se ejecuta fitBounds al alternar el bloqueo (la ref no
+  // figura en el deps del efecto de marcadores).
+  useLayoutEffect(() => {
+    editingLockedRef.current = editingLocked;
+    (Object.values(markersRef.current) as (L.Marker | undefined)[]).forEach(
+      (m) => {
+        try {
+          if (!m || !m.dragging) return;
+          if (editingLocked) {
+            m.dragging.disable();
+          } else {
+            m.dragging.enable();
+          }
+        } catch (e) {
+          console.warn('Error updating marker drag state', e);
+        }
+      },
+    );
+  }, [editingLocked]);
 
   const isValidLatLng = (
     coords: [number, number] | undefined,
@@ -129,7 +155,7 @@ const MapView: React.FC<MapViewProps> = ({
         const marker = L.marker(delivery.coordinates, {
           icon,
           zIndexOffset: isSelected ? 1000 : 0,
-          draggable: true,
+          draggable: !editingLockedRef.current,
         }).addTo(map);
 
         marker.on('click', (e) => {
