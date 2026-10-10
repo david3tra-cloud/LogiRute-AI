@@ -11,6 +11,7 @@ import {
   Trash2,
   ChevronDown,
   ChevronUp,
+  GripVertical,
   ArrowDownLeft,
   ArrowUpRight,
   AlertTriangle,
@@ -25,6 +26,7 @@ interface DeliveryCardProps {
   index?: number;
   isSelected: boolean;
   forceExpanded?: boolean;
+  editingLocked?: boolean;
   onToggleExpand?: (expanded: boolean) => void;
   onClick: () => void;
   onEdit: (delivery: Delivery) => void;
@@ -38,6 +40,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
   index,
   isSelected,
   forceExpanded = false,
+  editingLocked = false,
   onToggleExpand,
   onClick,
   onEdit,
@@ -47,30 +50,35 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
 }) => {
   const [internalExpanded, setInternalExpanded] = useState(false);
 
+  const isSortableDisabled =
+    editingLocked ||
+    delivery.status === DeliveryStatus.COMPLETED ||
+    delivery.status === DeliveryStatus.ISSUE;
+
   const {
     attributes,
     listeners,
+    setActivatorNodeRef,
     setNodeRef,
     transform,
     transition,
     isDragging,
   } = useSortable({
     id: delivery.id,
-    disabled:
-      delivery.status === DeliveryStatus.COMPLETED ||
-      delivery.status === DeliveryStatus.ISSUE,
+    disabled: isSortableDisabled,
   });
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.9 : 1,
-    cursor:
-      delivery.status === DeliveryStatus.COMPLETED ||
-      delivery.status === DeliveryStatus.ISSUE
-        ? 'default'
-        : 'grab',
-    touchAction: 'none',
+  };
+
+  // El touch-action: none vive SOLO en el tirador habilitado: el centro de
+  // la tarjeta queda libre para desplazamiento vertical con el dedo.
+  const dragHandleStyle: React.CSSProperties = {
+    touchAction: isSortableDisabled ? 'auto' : 'none',
+    cursor: isSortableDisabled ? 'default' : 'grab',
   };
 
   useEffect(() => {
@@ -133,6 +141,13 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
 
   const currentIndex = typeof index === 'number' ? index : 0;
 
+  // Campo real del componente usado para identificar la parada en las
+  // etiquetas accesibles del tirador y del chevron.
+  const stopName =
+    delivery.recipient?.trim() ||
+    delivery.address?.trim() ||
+    delivery.id;
+
   const isValidGoogleMapsUrl = (url?: string): boolean => {
     if (!url) return false;
     const googleMapsRegex =
@@ -189,16 +204,44 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
     <div
       ref={setNodeRef}
       style={style}
-      {...attributes}
-      {...listeners}
       onClick={onClick}
-      className={`relative mb-3 rounded-xl border-2 border-l-[6px] transition-all group shadow-sm hover:shadow-md ${
+      className={`relative mb-3 flex items-stretch rounded-xl border-2 border-l-[6px] transition-all group shadow-sm hover:shadow-md ${
         isSelected
           ? 'ring-2 ring-blue-500 ring-offset-1 bg-gradient-to-r from-blue-50 to-blue-100/60'
           : 'bg-white'
       } ${styles.border} ${styles.side}`}
     >
-      <div className="pl-4 pr-3 py-3">
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        disabled={isSortableDisabled}
+        onClick={(e) => e.stopPropagation()}
+        style={dragHandleStyle}
+        className={`shrink-0 w-9 flex flex-col items-center justify-center gap-1 select-none rounded-l-xl border-r border-slate-100 transition-all ${
+          isSortableDisabled
+            ? 'text-slate-200'
+            : 'text-slate-300 hover:text-blue-600 hover:bg-slate-50'
+        }`}
+        title={
+          editingLocked
+            ? 'Edición bloqueada'
+            : isSortableDisabled
+              ? 'Parada no reordable'
+              : 'Arrastrar para reordenar'
+        }
+        aria-label={
+          editingLocked
+            ? `Reordenar parada ${stopName} (edición bloqueada)`
+            : isSortableDisabled
+              ? `Parada ${stopName} no reordable`
+              : `Reordenar parada ${stopName}`
+        }
+      >
+        <GripVertical size={16} />
+      </button>
+      <div className="flex-1 min-w-0 pl-4 pr-3 py-3">
         <div className="flex justify-between items-start">
           <div className="flex items-center gap-3 overflow-hidden">
             {typeof currentIndex === 'number' &&
@@ -211,7 +254,8 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                   </span>
                   <button
                     onClick={handleClearSequence}
-                    className="absolute -top-1 -right-1 bg-white text-slate-400 border border-slate-200 rounded-full p-0.5 opacity-0 group-hover/seq:opacity-100 transition-opacity shadow-sm hover:text-red-500 hover:border-red-100"
+                    disabled={editingLocked}
+                    className="absolute -top-1 -right-1 bg-white text-slate-400 border border-slate-200 rounded-full p-0.5 opacity-0 group-hover/seq:opacity-100 transition-opacity shadow-sm hover:text-red-500 hover:border-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
                     title="Quitar de la ruta manual"
                   >
                     <X size={8} />
@@ -258,13 +302,14 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
           <div className="flex items-center gap-1 shrink-0 ml-2">
             <button
               type="button"
+              disabled={editingLocked}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
                 onEdit(delivery);
               }}
-              className="flex items-center gap-1 p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-white transition-all text-[10px] font-bold"
+              className="flex items-center gap-1 p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-white transition-all text-[10px] font-bold disabled:opacity-40 disabled:cursor-not-allowed"
               title="Editar parada"
             >
               <Pencil size={14} />
@@ -272,18 +317,29 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
             </button>
             <button
               type="button"
+              disabled={editingLocked}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete(delivery.id);
               }}
-              className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-white transition-all"
+              className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Trash2 size={16} />
             </button>
             <button
               type="button"
-              onClick={toggleExpand}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClick();
+                toggleExpand(e);
+              }}
+              aria-expanded={internalExpanded}
+              aria-label={
+                internalExpanded
+                  ? `Contraer detalle de ${stopName}`
+                  : `Ver detalle de ${stopName}`
+              }
               className="p-1.5 rounded-lg text-slate-400 hover:bg-white transition-all"
             >
               {internalExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
@@ -344,21 +400,23 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                     <>
                       <button
                         type="button"
+                        disabled={editingLocked}
                         onClick={(e) => {
                           e.stopPropagation();
                           onStatusChange(delivery.id, DeliveryStatus.COMPLETED);
                         }}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-green-600 text-green-600 hover:bg-green-50 text-[10px] font-black transition-all uppercase"
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-green-600 text-green-600 hover:bg-green-50 text-[10px] font-black transition-all uppercase disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <CheckCircle size={14} /> Entregado
                       </button>
                       <button
                         type="button"
+                        disabled={editingLocked}
                         onClick={(e) => {
                           e.stopPropagation();
                           onStatusChange(delivery.id, DeliveryStatus.ISSUE);
                         }}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-50 text-[10px] font-black transition-all uppercase"
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-50 text-[10px] font-black transition-all uppercase disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <AlertTriangle size={14} /> Incidencia
                       </button>
@@ -366,11 +424,12 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                   ) : (
                     <button
                       type="button"
+                      disabled={editingLocked}
                       onClick={(e) => {
                         e.stopPropagation();
                         onStatusChange(delivery.id, DeliveryStatus.PENDING);
                       }}
-                      className="text-[10px] font-black text-blue-600 hover:underline uppercase"
+                      className="text-[10px] font-black text-blue-600 hover:underline uppercase disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       Reabrir tarea
                     </button>

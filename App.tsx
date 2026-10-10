@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useRef,
+} from "react";
 import {
   Plus,
   Loader2,
@@ -14,6 +20,8 @@ import {
   FileText,
   Receipt,
   Download,
+  Lock,
+  Unlock,
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import MapView from "./MapView";
@@ -319,6 +327,14 @@ const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingDelivery, setEditingDelivery] = useState<Delivery | null>(null);
+  const [editingLocked, setEditingLocked] = useState(false);
+  const editingLockedRef = useRef(false);
+
+  // La ref se sincroniza en un layout effect (antes de los efectos pasivos
+  // de MapView); nunca se escribe ref.current durante el render.
+  useLayoutEffect(() => {
+    editingLockedRef.current = editingLocked;
+  }, [editingLocked]);
 
   const [conceptInput, setConceptInput] = useState("");
   const [unifiedInput, setUnifiedInput] = useState("");
@@ -536,6 +552,7 @@ const App: React.FC = () => {
   };
 
   const openEditDelivery = (delivery: Delivery) => {
+    if (editingLockedRef.current) return;
     invalidateMapsResolution();
     setEditingDelivery(delivery);
     setMapsSourceUrl(delivery.sourceUrl);
@@ -563,6 +580,12 @@ const App: React.FC = () => {
     setIsAdding(false);
     setEditingDelivery(null);
     initialLocationInputRef.current = "";
+  };
+
+  const handleToggleEditingLocked = () => {
+    // Req. 8: no alternar el bloqueo con el modal de añadir/editar abierto.
+    if (isAdding || editingDelivery) return;
+    setEditingLocked((prev) => !prev);
   };
 
   const handleResolveMapsInput = async () => {
@@ -880,9 +903,15 @@ const App: React.FC = () => {
   };
 
   const handleDeleteDelivery = (id: string) => {
+    if (editingLockedRef.current) return;
     setDeliveries((prev) => prev.filter((d) => d.id !== id));
     setManualSequence((prev) => prev.filter((x) => x !== id));
     if (selectedId === id) setSelectedId(null);
+  };
+
+  const handleRemoveFromSequence = (id: string) => {
+    if (editingLockedRef.current) return;
+    setManualSequence((prev) => prev.filter((x) => x !== id));
   };
 
   const handleAddDeCAToRoutes = async (
@@ -1000,6 +1029,7 @@ const App: React.FC = () => {
   };
 
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
+    if (editingLockedRef.current) return;
     // igual que en GitHub: reordena activas y completadas
     setDeliveries((prev) => {
       const updated = prev.map((d) => (d.id === id ? { ...d, status } : d));
@@ -1083,21 +1113,31 @@ const App: React.FC = () => {
     }
   };
 
-  const handleMarkerDragEnd = (id: string, coords: [number, number]) => {
-    setDeliveries((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, coordinates: coords } : d)),
-    );
-  };
+  // Callbacks estables para MapView: leen el bloqueo actual vía ref, así
+  // que alternar SOLO el bloqueo no cambia su identidad y no recrea
+  // marcadores. Deps [] legítimas: solo capturan setters y una ref estables.
+  const handleMarkerDragEnd = useCallback(
+    (id: string, coords: [number, number]) => {
+      if (editingLockedRef.current) return;
+      setDeliveries((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, coordinates: coords } : d)),
+      );
+    },
+    [],
+  );
 
-  const handleMarkerSelectForSequence = (id: string) => {
-    setManualSequence((prev) => {
-      if (prev.includes(id)) {
-        return prev.filter((x) => x !== id);
-      }
-      return [...prev, id];
-    });
+  const handleMarkerSelectForSequence = useCallback((id: string) => {
+    if (!editingLockedRef.current) {
+      setManualSequence((prev) => {
+        if (prev.includes(id)) {
+          return prev.filter((x) => x !== id);
+        }
+        return [...prev, id];
+      });
+    }
+    // La selección/consulta se mantiene con el bloqueo activo.
     setSelectedId((prev) => (prev === id ? null : id));
-  };
+  }, []);
 
   const pendingCount = deliveries.filter(
     (d) =>
@@ -1149,6 +1189,7 @@ const App: React.FC = () => {
   }
 
   const handleDragEndList = (event: DragEndEvent) => {
+    if (editingLockedRef.current) return;
     const { active, over } = event;
     if (!active || !over || active.id === over.id) return;
 
@@ -1423,7 +1464,26 @@ const App: React.FC = () => {
                 ))}
               </div>
 
-              <div className="hidden sm:flex items-center gap-2">
+              <div className="hidden sm:flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleToggleEditingLocked}
+                  disabled={isAdding || editingDelivery !== null}
+                  aria-pressed={editingLocked}
+                  title={
+                    editingLocked
+                      ? "Desbloquear edición de la ruta"
+                      : "Bloquear edición de la ruta"
+                  }
+                  className={`px-3 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md transition disabled:opacity-40 ${
+                    editingLocked
+                      ? "bg-amber-500 text-white hover:bg-amber-600"
+                      : "bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  {editingLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                  {editingLocked ? "Desbloquear edición" : "Bloquear edición"}
+                </button>
                 <button
                   onClick={openAddDelivery}
                   className="bg-blue-600 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md hover:bg-blue-700 transition"
@@ -1455,10 +1515,29 @@ const App: React.FC = () => {
           </header>
 
           {/* barra acciones móvil */}
-          <div className="sm:hidden bg-white border-b px-3 py-2 flex items-center justify-end gap-2">
+          <div className="sm:hidden bg-white border-b px-3 py-2 flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={handleToggleEditingLocked}
+              disabled={isAdding || editingDelivery !== null}
+              aria-pressed={editingLocked}
+              title={
+                editingLocked
+                  ? "Desbloquear edición de la ruta"
+                  : "Bloquear edición de la ruta"
+              }
+              className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md transition disabled:opacity-40 ${
+                editingLocked
+                  ? "bg-amber-500 text-white"
+                  : "bg-white text-slate-500 border border-slate-200"
+              }`}
+            >
+              {editingLocked ? <Lock size={12} /> : <Unlock size={12} />}
+              {editingLocked ? "Desbloquear" : "Bloquear"}
+            </button>
             <button
               onClick={openAddDelivery}
-              className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md"
+              className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md"
             >
               <Plus size={14} /> Nueva
             </button>
@@ -1467,7 +1546,7 @@ const App: React.FC = () => {
               disabled={
                 isOptimizing || !currentUserLoc || deliveries.length === 0
               }
-              className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase disabled:opacity-40"
+              className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase whitespace-nowrap disabled:opacity-40"
             >
               {isOptimizing ? "OPTIMIZANDO…" : "OPTIMIZAR"}
             </button>
@@ -1618,6 +1697,7 @@ const App: React.FC = () => {
                       onMarkerClick={handleMarkerSelectForSequence}
                       viewMode={viewMode}
                       onMarkerDragEnd={handleMarkerDragEnd}
+                      editingLocked={editingLocked}
                     />
                   </section>
                 )}
@@ -1645,11 +1725,8 @@ const App: React.FC = () => {
                               handleStatusChange(id, status)
                             }
                             onDelete={(id) => handleDeleteDelivery(id)}
-                            onRemoveFromSequence={(id) =>
-                              setManualSequence((prev) =>
-                                prev.filter((x) => x !== id),
-                              )
-                            }
+                            onRemoveFromSequence={handleRemoveFromSequence}
+                            editingLocked={editingLocked}
                           />
                         ))}
                       </SortableContext>
@@ -1680,11 +1757,8 @@ const App: React.FC = () => {
                               handleStatusChange(id, status)
                             }
                             onDelete={(id) => handleDeleteDelivery(id)}
-                            onRemoveFromSequence={(id) =>
-                              setManualSequence((prev) =>
-                                prev.filter((x) => x !== id),
-                              )
-                            }
+                            onRemoveFromSequence={handleRemoveFromSequence}
+                            editingLocked={editingLocked}
                           />
                         ))}
                       </SortableContext>
