@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import DeCAListCard from "./DeCAListCard";
 import QRCode from "qrcode";
 import { supabase } from "./lib/supabase";
 import {
@@ -5810,86 +5811,24 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 Aún no tienes ningún DeCA. Crea el primero.
               </div>
             ) : (
-              <div className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
+              <div className="space-y-3">
                 {decas.map((deca) => (
-                  <div
+                  <DeCAListCard
                     key={deca.id}
-                    className="grid min-w-0 gap-3 px-4 py-4 sm:px-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                  >
-                    <button
-                      type="button"
-                      data-testid={`deca-row-${deca.id}`}
-                      onClick={() => {
-                        setSelectedId(deca.id);
-                        setView("detail");
-                      }}
-                      className="grid w-full min-w-0 gap-3 text-left transition hover:bg-blue-50/50 sm:grid-cols-[0.8fr_2fr_1fr_1.2fr_auto] sm:items-center"
-                    >
-                      <span className="text-sm font-semibold text-slate-700">
-                        {formatDate(deca.fecha)}
-                      </span>
-                      <span className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
-                        <span className="min-w-0">
-                          <span className="block text-[10px] font-bold uppercase text-slate-500">
-                            Cargador
-                          </span>
-                          <span className="block truncate text-sm font-bold text-slate-900">
-                            {deca.cargador?.trim() || "Cargador no indicado"}
-                          </span>
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-[10px] font-bold uppercase text-slate-500">
-                            Destinatario
-                          </span>
-                          <span className="block truncate text-sm font-bold text-slate-900">
-                            {deca.destinatario?.trim() ||
-                              "Destinatario no indicado"}
-                          </span>
-                        </span>
-                      </span>
-                      <span className="text-sm text-slate-600">
-                        <span className="block text-[10px] font-bold uppercase text-slate-500">
-                          Ciudad de destino
-                        </span>
-                        {deca.ciudadDestino || "Sin ciudad"}
-                      </span>
-                      <span className="min-w-0 truncate text-sm text-slate-600">
-                        <span className="block text-[10px] font-bold uppercase text-slate-500">
-                          Mercancía
-                        </span>
-                        {deca.mercancia || "Sin mercancía"}
-                      </span>
-                      <span className="flex items-center justify-between gap-3 sm:justify-end">
-                        <span className="text-xs text-slate-500">
-                          <span className="block text-[10px] font-bold uppercase text-slate-500">
-                            Bultos / peso
-                          </span>
-                          {getDeCAMeasureSummary(deca)}
-                        </span>
-                        <span
-                          className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${estadoBadgeClasses(
-                            deca.estado,
-                          )}`}
-                        >
-                          {deca.estado === "EMITIENDO"
-                            ? "EMITIENDO"
-                            : deca.estado === "EMITIDO"
-                              ? "EMITIDO"
-                              : "Borrador"}
-                        </span>
-                      </span>
-                    </button>
-                    {deca.estado === "EMITIDO" &&
-                      isValidHttpsPdfUrl(deca.pdfPublicUrl) && (
-                        <button
-                          type="button"
-                          onClick={() => setQrOpenDeCA(deca)}
-                          className="justify-self-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:justify-self-auto"
-                        >
-                          Ver QR
-                        </button>
-                      )}
-                  </div>
+                    deca={deca}
+                    dateLabel={formatDate(deca.fecha)}
+                    measureSummary={getDeCAMeasureSummary(deca)}
+                    badgeClasses={estadoBadgeClasses(deca.estado)}
+                    canShowQr={
+                      deca.estado === "EMITIDO" &&
+                      isValidHttpsPdfUrl(deca.pdfPublicUrl)
+                    }
+                    onOpen={() => {
+                      setSelectedId(deca.id);
+                      setView("detail");
+                    }}
+                    onShowQr={() => setQrOpenDeCA(deca)}
+                  />
                 ))}
               </div>
             )}
