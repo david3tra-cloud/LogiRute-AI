@@ -54,7 +54,6 @@ export function optimizeDeliveries(
   const remaining = [...withCoords];
   const optimized: Delivery[] = [];
   let current = start;
-  let seq = 1;
 
   while (remaining.length > 0) {
     let bestIndex = 0;
@@ -71,17 +70,12 @@ export function optimizeDeliveries(
     }
 
     const next = remaining.splice(bestIndex, 1)[0];
-    optimized.push({ ...next, sequence: seq });
+    optimized.push({ ...next });
     current = { lat: next.coordinates[0], lng: next.coordinates[1] };
-    seq++;
   }
 
-  // 4) A las que no tienen coords les asignamos secuencia detrás, manteniendo su orden original
-  const withoutCoordsWithSeq = withoutCoords.map((d) => ({
-    ...d,
-    sequence: seq++,
-  }));
+  // 4) Las activas sin coordenadas mantienen su orden original.
 
   // 5) Las completadas e incidencias se devuelven al final tal cual
-  return [...optimized, ...withoutCoordsWithSeq, ...completed];
+  return [...optimized, ...withoutCoords, ...completed];
 }
