@@ -1,5 +1,5 @@
 import type { DeCA } from "./types";
-import { supabase } from "./lib/supabase";
+import { supabase, supabaseStorageUrl } from "./lib/supabase";
 import { loadUserEmpresaHabitualForDeCA } from "./empresasHabitualesSupabaseService";
 
 export type DecaRow = {
@@ -97,7 +97,7 @@ const validateOfficialDeCAPdfUrl = (
   let storageEndpoint: URL;
   try {
     parsedUrl = new URL(publicUrl);
-    storageEndpoint = new URL(supabase.storage.url);
+    storageEndpoint = new URL(supabaseStorageUrl);
   } catch {
     throw new Error("La URL pública del PDF oficial no es válida.");
   }
