@@ -1,7 +1,12 @@
 ﻿import { supabase } from "./lib/supabase";
 import type { Database } from "./database.types";
 import type { EmpresaHabitual } from "./types";
-import { normalizeRecipientText } from "./destinatariosService";
+import {
+  isUuid,
+  loadEmpresaIdMap,
+  normalizeRecipientText,
+  type EmpresaPayload,
+} from "./destinatariosService";
 
 export type EmpresaHabitualRow =
   Database["public"]["Tables"]["empresas_habituales"]["Row"];
@@ -15,8 +20,22 @@ export type EmpresaHabitualUpdate =
 const EMPRESA_COLUMNS =
   "id,user_id,nombre,direccion,ciudad,codigo_postal,provincia,pais,nif,telefono,email,contacto,notas,created_at,updated_at";
 
-const throwSupabaseError = (operation: string, message: string): never => {
-  throw new Error(`${operation}: ${message}`);
+export class EmpresaServiceError extends Error {
+  readonly code?: string;
+
+  constructor(operation: string, message: string, code?: string) {
+    super(`${operation}: ${message}`);
+    this.name = "EmpresaServiceError";
+    this.code = code;
+  }
+}
+
+const throwSupabaseError = (
+  operation: string,
+  message: string,
+  code?: string,
+): never => {
+  throw new EmpresaServiceError(operation, message, code);
 };
 
 const requireCurrentUserId = async (): Promise<string> => {
@@ -64,6 +83,9 @@ export async function listUserEmpresasHabituales(): Promise<
 export async function getUserEmpresaHabitual(
   id: string,
 ): Promise<EmpresaHabitualRow | null> {
+  if (!isUuid(id)) {
+    throw new Error("El identificador de la empresa habitual no es un UUID válido.");
+  }
   const userId = await requireCurrentUserId();
 
   const { data, error } = await supabase
@@ -90,11 +112,17 @@ export async function loadUserEmpresaHabitualForDeCA(
 ): Promise<EmpresaHabitual | undefined> {
   const userId = await requireCurrentUserId();
 
-  if (id?.trim()) {
+  const requestedId = id?.trim();
+  const resolvedId = requestedId
+    ? isUuid(requestedId)
+      ? requestedId
+      : loadEmpresaIdMap(userId)[requestedId]
+    : undefined;
+  if (resolvedId && isUuid(resolvedId)) {
     const { data, error } = await supabase
       .from("empresas_habituales")
       .select(EMPRESA_COLUMNS)
-      .eq("id", id)
+      .eq("id", resolvedId)
       .eq("user_id", userId)
       .maybeSingle();
 
@@ -102,6 +130,7 @@ export async function loadUserEmpresaHabitualForDeCA(
       return throwSupabaseError(
         "No se pudo cargar la empresa habitual del DeCA",
         error.message,
+        error.code,
       );
     }
     if (data) return mapSupabaseEmpresaHabitualToLocal(data);
@@ -148,12 +177,18 @@ export async function loadUserEmpresaHabitualForDeCA(
 
 export async function insertUserEmpresaHabitual(
   empresa: EmpresaHabitualInsert,
+  expectedUserId?: string,
 ): Promise<EmpresaHabitualRow> {
   const userId = await requireCurrentUserId();
+  if (expectedUserId && userId !== expectedUserId) {
+    throw new Error(
+      "La sesión cambió; no se puede insertar una empresa de otra cuenta.",
+    );
+  }
 
   const payload: EmpresaHabitualInsert = {
     ...empresa,
-    user_id: userId,
+    user_id: expectedUserId ?? userId,
   };
 
   const { data, error } = await supabase
@@ -166,6 +201,7 @@ export async function insertUserEmpresaHabitual(
     return throwSupabaseError(
       "No se pudo crear la empresa habitual",
       error.message,
+      error.code,
     );
   }
 
@@ -175,8 +211,17 @@ export async function insertUserEmpresaHabitual(
 export async function updateUserEmpresaHabitual(
   id: string,
   changes: EmpresaHabitualUpdate,
+  expectedUserId?: string,
 ): Promise<EmpresaHabitualRow> {
+  if (!isUuid(id)) {
+    throw new Error("El identificador de la empresa habitual no es un UUID válido.");
+  }
   const userId = await requireCurrentUserId();
+  if (expectedUserId && userId !== expectedUserId) {
+    throw new Error(
+      "La sesión cambió; no se puede actualizar una empresa de otra cuenta.",
+    );
+  }
 
   const {
     id: _ignoredId,
@@ -202,6 +247,7 @@ export async function updateUserEmpresaHabitual(
     return throwSupabaseError(
       "No se pudo actualizar la empresa habitual",
       error.message,
+      error.code,
     );
   }
 
@@ -230,6 +276,53 @@ export async function deleteUserEmpresaHabitual(
 
   return { deleted: data !== null };
 }
+export async function getEmpresaRowByIdForUser(
+  id: string,
+  userId: string,
+): Promise<EmpresaHabitualRow | null> {
+  if (!isUuid(id)) {
+    throw new EmpresaServiceError(
+      "No se pudo confirmar la empresa habitual",
+      "el identificador no es un UUID válido",
+      "22P02",
+    );
+  }
+  const { data, error } = await supabase
+    .from("empresas_habituales")
+    .select(EMPRESA_COLUMNS)
+    .eq("id", id)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    return throwSupabaseError(
+      "No se pudo confirmar la empresa habitual",
+      error.message,
+      error.code,
+    );
+  }
+  return data;
+}
+
+export const payloadMatchesEmpresaRow = (
+  payload: EmpresaPayload,
+  row: EmpresaHabitualRow,
+): boolean => {
+  const clean = (value: string | null | undefined) => value ?? "";
+  return (
+    clean(payload.nombre) === clean(row.nombre) &&
+    clean(payload.direccion) === clean(row.direccion) &&
+    clean(payload.ciudad) === clean(row.ciudad) &&
+    clean(payload.codigoPostal) === clean(row.codigo_postal) &&
+    clean(payload.provincia) === clean(row.provincia) &&
+    clean(payload.pais) === clean(row.pais) &&
+    clean(payload.nif) === clean(row.nif) &&
+    clean(payload.telefono) === clean(row.telefono) &&
+    clean(payload.email) === clean(row.email) &&
+    clean(payload.contacto) === clean(row.contacto) &&
+    clean(payload.notas) === clean(row.notas)
+  );
+};
+
 export function mapSupabaseEmpresaHabitualToLocal(
   row: EmpresaHabitualRow,
 ): EmpresaHabitual {

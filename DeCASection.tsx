@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
+import { supabase } from "./lib/supabase";
 import {
+  getEmpresaRowByIdForUser,
   insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
   loadUserEmpresaHabitualForDeCA,
   mapSupabaseEmpresaHabitualToLocal,
+  payloadMatchesEmpresaRow,
   updateUserEmpresaHabitual,
 } from "./empresasHabitualesSupabaseService";
 import {
@@ -35,10 +38,20 @@ import {
 } from "./transportistasHabitualesSupabaseService";
 import {
   createRecipientId,
-  EMPRESAS_STORAGE_KEY,
+  empresaPayloadsEqual,
+  empresaPayloadFrom,
+  isUuid,
+  loadEmpresaIdMap,
+  loadEmpresaPendingOpsForUser,
   loadEmpresas,
+  mergeEmpresaState,
   normalizeRecipientText,
   recipientDuplicateKey,
+  saveEmpresas,
+  saveEmpresaIdMap,
+  saveEmpresaPendingOpsForUser,
+  type EmpresaPendingOp,
+  type EmpresaPayload,
 } from "./destinatariosService";
 import {
   decaTemplateCsv,
@@ -53,10 +66,7 @@ import {
   DACHSER_SIGNAL_LABELS,
   detectDachserTemplateSignals,
 } from "./decaOcr";
-import {
-  generateDeCAPdf,
-  generateOfficialDeCAPdf,
-} from "./decaPdfService";
+import { generateDeCAPdf, generateOfficialDeCAPdf } from "./decaPdfService";
 import {
   DriveServiceError,
   isGoogleDriveConfigured,
@@ -133,9 +143,7 @@ const OfficialPdfQr = ({ url }: { url: string }) => {
           className="mx-auto h-auto w-full max-w-[200px]"
         />
       ) : generationFailed ? (
-        <p className="py-4 text-xs text-slate-500">
-          No se pudo generar el QR.
-        </p>
+        <p className="py-4 text-xs text-slate-500">No se pudo generar el QR.</p>
       ) : (
         <p className="py-4 text-xs text-slate-500">Generando QR…</p>
       )}
@@ -158,12 +166,7 @@ type DocumentAction =
   | "uploading"
   | "success"
   | "error";
-type EmissionAction =
-  | "idle"
-  | "reserving"
-  | "finalizing"
-  | "success"
-  | "error";
+type EmissionAction = "idle" | "reserving" | "finalizing" | "success" | "error";
 
 type DeCAForm = Pick<
   DeCA,
@@ -1404,6 +1407,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const [isMigratingCompanies, setIsMigratingCompanies] = useState(false);
   const [companyMigrationError, setCompanyMigrationError] = useState("");
   const [companyUpdateError, setCompanyUpdateError] = useState("");
+  const [companyLoadError, setCompanyLoadError] = useState("");
+  const [companySyncNotice, setCompanySyncNotice] = useState("");
   const [companyManagerAction, setCompanyManagerAction] = useState<
     "create" | "import" | undefined
   >(undefined);
@@ -1546,6 +1551,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const ocrWorkerRef = useRef<OCRWorker | null>(null);
   const mountedRef = useRef(true);
   const companyMigrationInProgressRef = useRef(false);
+  const companiesRef = useRef(companies);
+  const empresaMutationVersionRef = useRef(0);
+  const empresaQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const companyUserIdRef = useRef<string | null>(null);
+  const remoteEmpresaIdsRef = useRef(new Set<string>());
+  const empresaMergeAmbiguityRef = useRef(false);
   const transportistasRef = useRef(initialTransportistaLoad.items);
   const pendingTransportistaDeletesRef = useRef(
     loadPendingTransportistaDeletes(),
@@ -1572,6 +1583,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
   formRef.current = form;
+  companiesRef.current = companies;
 
   const persistTransportistasLocally = (
     items: TransportistaHabitual[],
@@ -1591,9 +1603,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     }
   };
 
-  const reconcileRemoteTransportistaDeletes = (
-    deletedLocalIds: string[],
-  ) => {
+  const reconcileRemoteTransportistaDeletes = (deletedLocalIds: string[]) => {
     if (deletedLocalIds.length === 0) return;
     const deletedIds = new Set(deletedLocalIds);
     const activeItems = transportistasRef.current.filter(
@@ -1680,9 +1690,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           !transportistasRef.current.some((item) => item.id === localId),
       );
       acknowledgeTransportistaDeletes(attempted, deleteResult);
-      reconcileRemoteTransportistaDeletes(
-        deleteResult.remoteDeletedLocalIds,
-      );
+      reconcileRemoteTransportistaDeletes(deleteResult.remoteDeletedLocalIds);
       if (deleteResult.failedDeletes.length > 0) {
         throw new Error(
           `Fallaron ${deleteResult.failedDeletes.length} borrados remotos.`,
@@ -1859,51 +1867,615 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     };
   }, []);
 
-  useEffect(() => {
-    let isCurrent = true;
+  const readEmpresaJournal = (
+    userId = companyUserIdRef.current,
+  ): EmpresaPendingOp[] => {
+    if (!userId) return [];
+    const result = loadEmpresaPendingOpsForUser(userId);
+    if (result.invalid) setCompanyStorageWarning(true);
+    return result.ops;
+  };
 
-    const loadRemoteEmpresas = async () => {
-      try {
-        const rows = await listUserEmpresasHabituales();
-        if (!isCurrent) return;
+  const persistEmpresaRows = (
+    rows: EmpresaHabitual[],
+    userId = companyUserIdRef.current,
+  ): boolean => {
+    const saved = saveEmpresas(rows, userId ?? undefined);
+    if (!saved) setCompanyStorageWarning(true);
+    return saved;
+  };
 
-        const remoteCompanies = rows.map(mapSupabaseEmpresaHabitualToLocal);
-        if (remoteCompanies.length > 0) {
-          setHasPendingCompanyMigration(false);
-          setCompanies(remoteCompanies);
-          setCompanyMigrationNotice("");
-        } else if (companies.length > 0) {
-          setHasPendingCompanyMigration(true);
-          setCompanyMigrationNotice(
-            `Hay ${companies.length} empresas locales pendientes de sincronizar con Supabase.`,
+  const empresaErrorMessage = (error: unknown): string =>
+    error instanceof Error ? error.message : String(error);
+
+  const empresaErrorCode = (error: unknown): string | undefined =>
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+      ? (error as { code: string }).code
+      : undefined;
+
+  const composeCompanySyncNotice = (sessionUserId: string | null): string => {
+    const messages: string[] = [];
+    const journal = sessionUserId ? readEmpresaJournal(sessionUserId) : [];
+    const unownedBackupCount = loadEmpresas().items.length;
+    if (!sessionUserId && unownedBackupCount > 0) {
+      messages.push(
+        "Hay un respaldo local de empresas sin propietario; inicia sesión e impórtalo expresamente para asociarlo a una cuenta.",
+      );
+    }
+    if (sessionUserId && unownedBackupCount > 0) {
+      messages.push(
+        "Hay un respaldo local de empresas sin propietario. Pulsa «Sincronizar empresas locales» para incorporarlo expresamente a esta cuenta.",
+      );
+    }
+    if (sessionUserId && journal.length > 0) {
+      messages.push(
+        `Hay ${journal.length} cambios de empresas pendientes de sincronizar.`,
+      );
+    }
+    if (empresaMergeAmbiguityRef.current) {
+      messages.push(
+        "Hay empresas locales con cambios que no coinciden de forma unívoca con las remotas; se conserva el respaldo local. Revísalas manualmente.",
+      );
+    }
+    return messages.join(" ");
+  };
+
+  const applyEmpresaIdRemaps = (
+    remaps: readonly { from: string; to: string }[],
+    userId: string,
+  ): boolean => {
+    const effective = remaps.filter(
+      (entry) =>
+        entry.from && entry.to && entry.from !== entry.to && isUuid(entry.to),
+    );
+    if (effective.length === 0) return true;
+
+    const fromIds = new Set(effective.map((entry) => entry.from));
+    const lastTargetByFrom = new Map(
+      effective.map((entry) => [entry.from, entry.to]),
+    );
+
+    // 1) Preparar en memoria el mapa y el diario siguientes.
+    const nextIdMap = { ...loadEmpresaIdMap(userId) };
+    let mapChanged = false;
+    for (const entry of effective) {
+      if (nextIdMap[entry.from] !== entry.to) {
+        nextIdMap[entry.from] = entry.to;
+        mapChanged = true;
+      }
+    }
+
+    const journal = readEmpresaJournal(userId);
+    let journalChanged = false;
+    const nextJournal = journal.map((op) => {
+      if (op.userId !== userId || !fromIds.has(op.localId)) return op;
+      journalChanged = true;
+      const toId = lastTargetByFrom.get(op.localId) ?? op.localId;
+      return {
+        ...op,
+        localId: toId,
+        targetId: op.targetId === op.localId ? toId : op.targetId,
+      };
+    });
+
+    // 2) Guardar primero las evidencias durables. Si una escritura falla no
+    // se muta React; la evidencia ya escrita se conserva y la operación
+    // posterior puede repetirse de forma idempotente (mismos from→to).
+    if (mapChanged && !saveEmpresaIdMap(nextIdMap, userId)) {
+      setCompanyStorageWarning(true);
+      setCompanyUpdateError(
+        "No se pudo guardar el mapa local de identificadores de empresas. No se aplicó el cambio de identificador para evitar dejar referencias inconsistentes.",
+      );
+      return false;
+    }
+    if (journalChanged && !saveEmpresaPendingOpsForUser(userId, nextJournal)) {
+      setCompanyStorageWarning(true);
+      setCompanyUpdateError(
+        "No se pudo actualizar la cola de pendientes de empresas tras cambiar un identificador. La evidencia guardada se conserva; corrige el almacenamiento del navegador y reintenta.",
+      );
+      return false;
+    }
+
+    const nextCompanies = companiesRef.current.map((company) => {
+      const target = lastTargetByFrom.get(company.id);
+      return target ? { ...company, id: target } : company;
+    });
+    companiesRef.current = nextCompanies;
+    setCompanies(nextCompanies);
+    setDecas((current) =>
+      current.map((deca) =>
+        deca.estado !== "EMITIDO" && deca.cargadorId !== undefined
+          ? {
+              ...deca,
+              cargadorId:
+                lastTargetByFrom.get(deca.cargadorId ?? "") ??
+                deca.cargadorId,
+            }
+          : deca,
+      ),
+    );
+    if (formRef.current.cargadorId) {
+      const formTarget = lastTargetByFrom.get(formRef.current.cargadorId);
+      if (formTarget) {
+        const nextForm = { ...formRef.current, cargadorId: formTarget };
+        formRef.current = nextForm;
+        setForm(nextForm);
+      }
+    }
+    persistEmpresaRows(nextCompanies, userId);
+    return true;
+  };
+
+  const findEmpresaPendingOp = (userId: string, localId: string) =>
+    readEmpresaJournal(userId).find(
+      (op) => op.userId === userId && op.localId === localId,
+    );
+
+  const removeEmpresaPendingOp = (
+    userId: string,
+    localId: string,
+    revision: number,
+  ): boolean => {
+    const journal = readEmpresaJournal(userId);
+    const index = journal.findIndex(
+      (op) =>
+        op.userId === userId &&
+        op.localId === localId &&
+        op.revision === revision,
+    );
+    if (index < 0) return false;
+    journal.splice(index, 1);
+    const saved = saveEmpresaPendingOpsForUser(userId, journal);
+    if (!saved) setCompanyStorageWarning(true);
+    setHasPendingCompanyMigration(!saved || journal.length > 0);
+    return saved;
+  };
+
+  const empresaSessionMatches = async (userId: string): Promise<boolean> => {
+    return (await getCurrentUserId()) === userId;
+  };
+
+  const toEmpresaWriteFields = (payload: EmpresaPayload) => ({
+    nombre: payload.nombre,
+    direccion: payload.direccion || null,
+    ciudad: payload.ciudad || null,
+    codigo_postal: payload.codigoPostal || null,
+    provincia: payload.provincia || null,
+    pais: payload.pais || null,
+    nif: payload.nif || null,
+    telefono: payload.telefono || null,
+    email: payload.email || null,
+    contacto: payload.contacto || null,
+    notas: payload.notas || null,
+  });
+
+  const flushEmpresaJournal = async (userId: string): Promise<void> => {
+    if (!mountedRef.current || companyUserIdRef.current !== userId) return;
+    const localIds = [
+      ...new Set(readEmpresaJournal(userId).map((op) => op.localId)),
+    ];
+
+    for (const localId of localIds) {
+      const op = findEmpresaPendingOp(userId, localId);
+      if (!op || !(await empresaSessionMatches(userId))) return;
+
+      let row = await getEmpresaRowByIdForUser(op.targetId, userId);
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        return;
+      }
+
+      if (op.kind === "insert") {
+        if (!row) {
+          // Evidencia durable del payload que se va a enviar: se guarda
+          // antes de llamar al INSERT; si no puede guardarse, no se envía.
+          const evidenceJournal = readEmpresaJournal(userId);
+          const evidenceIndex = evidenceJournal.findIndex(
+            (entry) =>
+              entry.userId === userId &&
+              entry.localId === localId &&
+              entry.targetId === op.targetId,
           );
-        } else {
-          setHasPendingCompanyMigration(false);
-          setCompanies([]);
-          setCompanyMigrationNotice("");
+          if (evidenceIndex < 0) return;
+          evidenceJournal[evidenceIndex] = {
+            ...evidenceJournal[evidenceIndex],
+            insertedPayload: op.payload,
+            updatedAt: new Date().toISOString(),
+          };
+          if (!saveEmpresaPendingOpsForUser(userId, evidenceJournal)) {
+            setCompanyStorageWarning(true);
+            throw new Error(
+              `No se pudo registrar la evidencia de inserción de "${op.payload.nombre}". No se envió el INSERT para no dejar la operación sin respaldo recuperable.`,
+            );
+          }
+
+          try {
+            row = await insertUserEmpresaHabitual(
+              {
+                id: op.targetId,
+                user_id: userId,
+                ...toEmpresaWriteFields(op.payload),
+              },
+              userId,
+            );
+          } catch (error) {
+            if (empresaErrorCode(error) !== "23505") throw error;
+
+            if (
+              companyUserIdRef.current !== userId ||
+              !(await empresaSessionMatches(userId))
+            ) {
+              return;
+            }
+
+            row = await getEmpresaRowByIdForUser(op.targetId, userId);
+            if (!row) throw error;
+          }
         }
-      } catch (error) {
-        console.error(
-          "No se pudieron cargar las empresas habituales desde Supabase. Se mantiene el respaldo local.",
-          error,
+
+        if (row.user_id !== userId) {
+          throw new Error(
+            `Conflicto al insertar "${op.payload.nombre}": la fila existente pertenece a otra cuenta. Se conserva el cambio pendiente sin sobrescribirla.`,
+          );
+        }
+
+        const matchesSentInsertPayload = payloadMatchesEmpresaRow(
+          op.payload,
+          row,
+        );
+        const matchesInsertedEvidence =
+          op.insertedPayload !== undefined &&
+          payloadMatchesEmpresaRow(op.insertedPayload, row);
+
+        if (!matchesSentInsertPayload && !matchesInsertedEvidence) {
+          throw new Error(
+            `Conflicto al insertar "${op.payload.nombre}": existe una fila con el mismo identificador y datos que no coinciden con lo que se envió ni con el cambio local más reciente. Se conserva el cambio pendiente sin sobrescribirla.`,
+          );
+        }
+
+        if (!matchesSentInsertPayload && matchesInsertedEvidence) {
+          // El INSERT enviado se completó pero el payload local ya cambió:
+          // convertir durablemente la operación a update y sincronizarla.
+          const conversionJournal = readEmpresaJournal(userId);
+          const conversionIndex = conversionJournal.findIndex(
+            (entry) =>
+              entry.userId === userId &&
+              entry.localId === localId &&
+              entry.targetId === op.targetId,
+          );
+          if (conversionIndex < 0) return;
+          conversionJournal[conversionIndex] = {
+            ...conversionJournal[conversionIndex],
+            kind: "update",
+          };
+          if (!saveEmpresaPendingOpsForUser(userId, conversionJournal)) {
+            setCompanyStorageWarning(true);
+            throw new Error(
+              `La inserción de "${op.payload.nombre}" se completó en el servidor, pero no se pudo guardar la transición a actualización pendiente. No se sobrescribe ningún dato y no se declara completada la sincronización.`,
+            );
+          }
+          if (!(await empresaSessionMatches(userId))) return;
+          await updateUserEmpresaHabitual(
+            op.targetId,
+            toEmpresaWriteFields(conversionJournal[conversionIndex].payload),
+            userId,
+          );
+        }
+      } else {
+        if (!row) {
+          throw new Error(
+            `No se pudo actualizar "${op.payload.nombre}": la empresa ya no existe en el servidor. Se conserva el cambio pendiente y no se recrea automáticamente.`,
+          );
+        }
+
+        if (!payloadMatchesEmpresaRow(op.payload, row)) {
+          await updateUserEmpresaHabitual(
+            op.targetId,
+            toEmpresaWriteFields(op.payload),
+            userId,
+          );
+        }
+      }
+
+      const latestJournal = readEmpresaJournal(userId);
+      const latestIndex = latestJournal.findIndex(
+        (entry) =>
+          entry.userId === userId &&
+          entry.localId === localId &&
+          entry.targetId === op.targetId,
+      );
+      const latestOp =
+        latestIndex >= 0 ? latestJournal[latestIndex] : undefined;
+      const latestPayload = latestOp?.payload ?? op.payload;
+
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        return;
+      }
+
+      const confirmed = await getEmpresaRowByIdForUser(op.targetId, userId);
+      if (
+        !confirmed ||
+        confirmed.user_id !== userId ||
+        !(
+          payloadMatchesEmpresaRow(op.payload, confirmed) ||
+          payloadMatchesEmpresaRow(latestPayload, confirmed) ||
+          (op.insertedPayload !== undefined &&
+            payloadMatchesEmpresaRow(op.insertedPayload, confirmed))
+        )
+      ) {
+        throw new Error(
+          `No se pudo confirmar la revisión ${op.revision} de "${op.payload.nombre}".`,
         );
       }
-    };
+      if (!(await empresaSessionMatches(userId))) return;
 
-    void loadRemoteEmpresas();
+      if (!mountedRef.current || companyUserIdRef.current !== userId) {
+        return;
+      }
+      empresaMutationVersionRef.current += 1;
+      remoteEmpresaIdsRef.current.add(confirmed.id);
 
-    return () => {
-      isCurrent = false;
-    };
-  }, []);
+      if (op.kind === "insert" && latestOp && latestOp.revision > op.revision) {
+        // Releer el diario justo antes de escribir para no pisar una
+        // edición posterior con datos obsoletos.
+        const convertJournal = readEmpresaJournal(userId);
+        const convertIndex = convertJournal.findIndex(
+          (entry) =>
+            entry.userId === userId &&
+            entry.localId === localId &&
+            entry.targetId === op.targetId,
+        );
+        if (convertIndex >= 0) {
+          convertJournal[convertIndex] = {
+            ...convertJournal[convertIndex],
+            kind: "update",
+          };
+
+          if (!saveEmpresaPendingOpsForUser(userId, convertJournal)) {
+            setCompanyStorageWarning(true);
+            throw new Error(
+              `La inserción de "${op.payload.nombre}" se confirmó, pero no se pudo guardar la edición posterior como actualización pendiente. No se declara completada la sincronización.`,
+            );
+          }
+        }
+      } else {
+        const removed = removeEmpresaPendingOp(userId, localId, op.revision);
+
+        if (
+          !removed &&
+          findEmpresaPendingOp(userId, localId)?.revision === op.revision
+        ) {
+          throw new Error(
+            `La escritura de "${op.payload.nombre}" se confirmó, pero no se pudo retirar su pendiente del almacenamiento local.`,
+          );
+        }
+      }
+      const current = companiesRef.current.find(
+        (company) => company.id === op.localId,
+      );
+      if (
+        current &&
+        empresaPayloadsEqual(empresaPayloadFrom(current), op.payload)
+      ) {
+        const synced = mapSupabaseEmpresaHabitualToLocal(confirmed);
+        const next = companiesRef.current.map((company) =>
+          company.id === op.localId ? { ...company, ...synced } : company,
+        );
+        companiesRef.current = next;
+        setCompanies(next);
+        persistEmpresaRows(next, userId);
+      }
+    }
+    if (await empresaSessionMatches(userId)) {
+      const remaining = readEmpresaJournal(userId);
+      setHasPendingCompanyMigration(
+        remaining.length > 0 || loadEmpresas().items.length > 0,
+      );
+      setCompanySyncNotice(composeCompanySyncNotice(userId));
+      if (remaining.length === 0) setCompanyUpdateError("");
+    }
+  };
+
+  const scheduleEmpresaFlush = (userId: string): Promise<void> => {
+    const task = empresaQueueRef.current.then(() =>
+      flushEmpresaJournal(userId),
+    );
+    empresaQueueRef.current = task.catch((error: unknown) => {
+      if (!mountedRef.current || companyUserIdRef.current !== userId) return;
+      console.error(
+        "No se pudieron sincronizar las empresas habituales. Los cambios siguen pendientes localmente.",
+        error,
+      );
+      setCompanyUpdateError(
+        `No se pudieron sincronizar las empresas habituales. Los cambios siguen pendientes localmente. ${empresaErrorMessage(error)}`,
+      );
+      setHasPendingCompanyMigration(
+        readEmpresaJournal(userId).length > 0 ||
+          loadEmpresas().items.length > 0,
+      );
+      setCompanySyncNotice(composeCompanySyncNotice(userId));
+    });
+    return empresaQueueRef.current;
+  };
+
+  const applyRemoteEmpresaRows = (
+    remoteRows: EmpresaHabitual[],
+    userId: string,
+  ) => {
+    if (companyUserIdRef.current !== userId) return;
+    const merged = mergeEmpresaState(
+      companiesRef.current,
+      remoteRows,
+      readEmpresaJournal(userId),
+    );
+    if (!applyEmpresaIdRemaps(merged.remaps, userId)) {
+      // Las evidencias del remapeo no pudieron guardarse: no se aplica la
+      // fusión para no dejar referencias inconsistentes.
+      setCompanyLoadError(
+        "No se pudieron guardar las evidencias de identificadores de algunas empresas locales. La lista remota no se aplicó. Revisa el almacenamiento del navegador.",
+      );
+      return;
+    }
+    empresaMergeAmbiguityRef.current = merged.ambiguous;
+    remoteEmpresaIdsRef.current = new Set(remoteRows.map((row) => row.id));
+    companiesRef.current = merged.rows;
+    setCompanies(merged.rows);
+    persistEmpresaRows(merged.rows, userId);
+    setCompanyLoadError("");
+    setCompanySyncNotice(composeCompanySyncNotice(userId));
+    setHasPendingCompanyMigration(
+      readEmpresaJournal(userId).length > 0 || loadEmpresas().items.length > 0,
+    );
+  };
 
   useEffect(() => {
-    try {
-      localStorage.setItem(EMPRESAS_STORAGE_KEY, JSON.stringify(companies));
-    } catch {
-      setCompanyStorageWarning(true);
-    }
-  }, [companies]);
+    let active = true;
+    let initialized = false;
+    let loadVersion = 0;
+
+    const loadForUser = (sessionUserId: string | null) => {
+      if (initialized && companyUserIdRef.current === sessionUserId) return;
+      initialized = true;
+      const version = ++loadVersion;
+      companyUserIdRef.current = sessionUserId;
+      remoteEmpresaIdsRef.current = new Set();
+      empresaMergeAmbiguityRef.current = false;
+      // El estado de migración pertenece a la cuenta anterior: se limpia
+      // al cambiar de sesión para no publicar el estado de una sesión vieja.
+      companyMigrationInProgressRef.current = false;
+      setIsMigratingCompanies(false);
+      setCompanyLoadError("");
+      setCompanyUpdateError("");
+
+      const local = loadEmpresas(sessionUserId ?? undefined);
+      if (local.invalid) setCompanyStorageWarning(true);
+
+      const pendingOps = sessionUserId ? readEmpresaJournal(sessionUserId) : [];
+
+      const recoveredById = new Map<string, EmpresaHabitual>(
+        local.items.map((company) => [company.id, company]),
+      );
+
+      const latestPendingById = new Map<string, EmpresaPendingOp>();
+
+      for (const op of pendingOps) {
+        const previousOp = latestPendingById.get(op.localId);
+
+        if (!previousOp || op.revision > previousOp.revision) {
+          latestPendingById.set(op.localId, op);
+        }
+      }
+
+      for (const op of latestPendingById.values()) {
+        const existing = recoveredById.get(op.localId);
+
+        recoveredById.set(op.localId, {
+          ...existing,
+          ...op.payload,
+          id: op.localId,
+          createdAt: existing?.createdAt ?? op.createdAt,
+          updatedAt: op.updatedAt,
+        });
+      }
+
+      const recoveredRows = [...recoveredById.values()];
+
+      companiesRef.current = recoveredRows;
+      setCompanies(recoveredRows);
+
+      if (sessionUserId && pendingOps.length > 0) {
+        persistEmpresaRows(recoveredRows, sessionUserId);
+      }
+
+      const unownedBackup = sessionUserId ? loadEmpresas().items : [];
+      const pendingCount = pendingOps.length;
+      setHasPendingCompanyMigration(
+        pendingCount > 0 ||
+          unownedBackup.length > 0 ||
+          (!sessionUserId && local.items.length > 0),
+      );
+      setCompanySyncNotice(
+        unownedBackup.length > 0
+          ? "Hay un respaldo local de empresas sin propietario. Pulsa «Sincronizar empresas locales» para incorporarlo expresamente a esta cuenta."
+          : sessionUserId
+            ? composeCompanySyncNotice(sessionUserId)
+            : local.items.length > 0
+              ? "Los cambios locales de empresas todavía no están asociados a una cuenta."
+              : "",
+      );
+
+      if (!sessionUserId) return;
+      void (async () => {
+        try {
+          await scheduleEmpresaFlush(sessionUserId);
+          if (
+            !active ||
+            version !== loadVersion ||
+            !(await empresaSessionMatches(sessionUserId))
+          ) {
+            return;
+          }
+
+          const mutationVersionAtRequest = empresaMutationVersionRef.current;
+
+          const rows = await listUserEmpresasHabituales();
+          const sessionStillMatches =
+            await empresaSessionMatches(sessionUserId);
+
+          if (
+            !active ||
+            version !== loadVersion ||
+            companyUserIdRef.current !== sessionUserId ||
+            !sessionStillMatches
+          ) {
+            return;
+          }
+
+          if (mutationVersionAtRequest !== empresaMutationVersionRef.current) {
+            setCompanyLoadError(
+              "La carga remota coincidió con cambios de empresas y se descartó para no sobrescribirlos. Se conserva la lista actual; queda pendiente actualizar la lista remota.",
+            );
+            return;
+          }
+
+          applyRemoteEmpresaRows(
+            rows.map(mapSupabaseEmpresaHabitualToLocal),
+            sessionUserId,
+          );
+        } catch (error) {
+          if (!active || version !== loadVersion) return;
+          console.error(
+            "No se pudieron cargar las empresas habituales desde Supabase. Se mantiene el respaldo local.",
+            error,
+          );
+          setCompanyLoadError(
+            `No se pudieron cargar las empresas habituales desde Supabase. Se muestra el respaldo local. ${empresaErrorMessage(error)}`,
+          );
+        }
+      })();
+    };
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      loadForUser(session?.user.id ?? null);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -2054,9 +2626,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       }));
     } finally {
       addingDeCAIdsRef.current.delete(deca.id);
-      setAddingDeCAIds((current) =>
-        current.filter((id) => id !== deca.id),
-      );
+      setAddingDeCAIds((current) => current.filter((id) => id !== deca.id));
     }
   };
   const isSelectedDeCADraft =
@@ -2137,10 +2707,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       const currentRow = rows.find((row) => row.id === selectedDeCA.id);
       if (currentRow?.deleted_at === null) {
         integrateRemoteDeCA(currentRow);
-      } else if (
-        currentRow ||
-        remoteDecaIdsRef.current.has(selectedDeCA.id)
-      ) {
+      } else if (currentRow || remoteDecaIdsRef.current.has(selectedDeCA.id)) {
         setDecas((current) =>
           current.filter((deca) => deca.id !== selectedDeCA.id),
         );
@@ -2358,12 +2925,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           if (current.estado === "EMITIENDO") {
             reconciliationMessage =
               "El DeCA continúa en EMITIENDO; puedes reintentar la emisión.";
-            setEmissionRetryIds((retryIds) =>
-              new Set(retryIds).add(decaId),
-            );
+            setEmissionRetryIds((retryIds) => new Set(retryIds).add(decaId));
           } else {
-            reconciliationMessage =
-              `El estado remoto es ${current.estado}; no se puede reintentar la finalización.`;
+            reconciliationMessage = `El estado remoto es ${current.estado}; no se puede reintentar la finalización.`;
             setEmissionRetryIds((retryIds) => {
               const next = new Set(retryIds);
               next.delete(decaId);
@@ -2376,8 +2940,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           "No se pudo reconciliar el resultado de la finalización remota.",
           reconcileError,
         );
-        reconciliationMessage =
-          `No se pudo consultar el estado remoto: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`;
+        reconciliationMessage = `No se pudo consultar el estado remoto: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`;
         setEmissionRetryIds((retryIds) => new Set(retryIds).add(decaId));
       }
       setEmissionAction("error");
@@ -2676,57 +3239,160 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setView("companies");
   };
 
-  const updateCompanies = (next: EmpresaHabitual[]) => {
-    const changedCompanies = next.filter((company) => {
-      const current = companies.find((item) => item.id === company.id);
+  const updateCompanies = async (
+    next: EmpresaHabitual[],
+    forceSyncIds: readonly string[] = [],
+  ): Promise<void> => {
+    const requestedSyncIds = new Set(forceSyncIds);
+    empresaMutationVersionRef.current += 1;
+    const previous = companiesRef.current;
+    const userId = companyUserIdRef.current;
+    let nextItems = next;
+    let changedCompanies = nextItems.filter((company) => {
+      const current = previous.find((item) => item.id === company.id);
       return (
-        current !== undefined &&
-        (current.nombre !== company.nombre ||
-          current.direccion !== company.direccion ||
-          current.ciudad !== company.ciudad ||
-          current.codigoPostal !== company.codigoPostal ||
-          current.provincia !== company.provincia ||
-          current.pais !== company.pais ||
-          current.nif !== company.nif ||
-          current.telefono !== company.telefono ||
-          current.email !== company.email ||
-          current.contacto !== company.contacto ||
-          current.notas !== company.notas)
+        requestedSyncIds.has(company.id) ||
+        !current ||
+        !empresaPayloadsEqual(
+          empresaPayloadFrom(current),
+          empresaPayloadFrom(company),
+        )
       );
     });
 
-    setCompanies(next);
-    setCompanyStorageWarning(false);
-    setCompanyUpdateError("");
+    try {
+      const plannedRemaps: { from: string; to: string }[] = [];
+      for (const company of changedCompanies) {
+        if (isUuid(company.id)) continue;
+        const newId = createRecipientId();
+        if (requestedSyncIds.has(company.id)) {
+          requestedSyncIds.add(newId);
+        }
+        plannedRemaps.push({ from: company.id, to: newId });
+      }
 
-    if (changedCompanies.length === 0) return;
-
-    void Promise.allSettled(
-      changedCompanies.map((company) =>
-        updateUserEmpresaHabitual(company.id, {
-          nombre: company.nombre,
-          direccion: company.direccion || null,
-          ciudad: company.ciudad || null,
-          codigo_postal: company.codigoPostal || null,
-          provincia: company.provincia || null,
-          pais: company.pais || null,
-          nif: company.nif || null,
-          telefono: company.telefono || null,
-          email: company.email || null,
-          contacto: company.contacto || null,
-          notas: company.notas || null,
-        }),
-      ),
-    ).then((results) => {
-      const failedCount = results.filter(
-        (result) => result.status === "rejected",
-      ).length;
+      if (plannedRemaps.length > 0) {
+        // Con sesión, las evidencias (mapa y diario) se guardan antes de
+        // tocar el estado; sin sesión solo se renombran en memoria.
+        if (userId && !applyEmpresaIdRemaps(plannedRemaps, userId)) {
+          return;
+        }
+        const newIdByOldId = new Map(
+          plannedRemaps.map((entry) => [entry.from, entry.to]),
+        );
+        nextItems = nextItems.map((item) => {
+          const newId = newIdByOldId.get(item.id);
+          return newId ? { ...item, id: newId } : item;
+        });
+      }
+    } catch (error) {
       setCompanyUpdateError(
-        failedCount === 0
-          ? ""
-          : `Fallaron ${failedCount} actualizaciones de empresas habituales en Supabase. Los cambios se conservaron localmente.`,
+        `No se pudo preparar el identificador seguro de una empresa. Los datos siguen disponibles localmente. ${empresaErrorMessage(error)}`,
+      );
+      return;
+    }
+
+    changedCompanies = nextItems.filter((company) => {
+      const current = previous.find((item) => item.id === company.id);
+
+      return (
+        requestedSyncIds.has(company.id) ||
+        !current ||
+        !empresaPayloadsEqual(
+          empresaPayloadFrom(current),
+          empresaPayloadFrom(company),
+        )
       );
     });
+    // El diario de pendientes se guarda antes de publicar la lista local:
+    // si su escritura falla, no se aplica la nueva lista y la edición no
+    // queda registrada como irrecuperable.
+    if (userId && changedCompanies.length > 0) {
+      const journal = readEmpresaJournal(userId);
+      const timestamp = new Date().toISOString();
+      for (const company of changedCompanies) {
+        const index = journal.findIndex(
+          (op) => op.userId === userId && op.localId === company.id,
+        );
+        const currentOp = index >= 0 ? journal[index] : undefined;
+        const targetId = currentOp?.targetId ?? company.id;
+        if (!isUuid(targetId)) {
+          setCompanyUpdateError(
+            `No se pudo crear una operación válida para "${company.nombre}".`,
+          );
+          return;
+        }
+        const operation: EmpresaPendingOp = {
+          userId,
+          kind:
+            currentOp?.kind ??
+            (remoteEmpresaIdsRef.current.has(targetId) ? "update" : "insert"),
+          localId: company.id,
+          targetId,
+          revision: (currentOp?.revision ?? 0) + 1,
+          payload: empresaPayloadFrom(company),
+          createdAt: currentOp?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        };
+        if (currentOp?.insertedPayload !== undefined) {
+          // La evidencia del INSERT enviado se conserva hasta que la
+          // transición a update o la confirmación final queden guardadas.
+          operation.insertedPayload = currentOp.insertedPayload;
+        }
+        if (index >= 0) journal[index] = operation;
+        else journal.push(operation);
+      }
+      if (!saveEmpresaPendingOpsForUser(userId, journal)) {
+        setCompanyStorageWarning(true);
+        setCompanyUpdateError(
+          "No se pudieron guardar de forma duradera los cambios pendientes. No se aplicó la nueva lista para no dejar ediciones sin pendiente recuperable.",
+        );
+        return;
+      }
+      setHasPendingCompanyMigration(
+        journal.length > 0 || loadEmpresas().items.length > 0,
+      );
+      setCompanySyncNotice(composeCompanySyncNotice(userId));
+    }
+
+    companiesRef.current = nextItems;
+    setCompanies(nextItems);
+    const persisted = persistEmpresaRows(nextItems, userId);
+    setCompanyStorageWarning(!persisted);
+    setCompanyUpdateError("");
+    if (!userId) {
+      if (changedCompanies.length > 0) {
+        setHasPendingCompanyMigration(true);
+        setCompanySyncNotice(
+          "Los cambios locales de empresas todavía no están asociados a una cuenta.",
+        );
+      }
+      return;
+    }
+    if (!changedCompanies.length) return;
+
+    try {
+      if (!(await empresaSessionMatches(userId))) {
+        if (mountedRef.current && companyUserIdRef.current === userId) {
+          setCompanyUpdateError(
+            "La sesión cambió; los cambios se conservaron pendientes en su cuenta original y no se enviaron a otra cuenta.",
+          );
+        }
+        return;
+      }
+      await scheduleEmpresaFlush(userId);
+    } catch (error) {
+      if (!mountedRef.current || companyUserIdRef.current !== userId) {
+        return;
+      }
+      console.error(
+        "No se pudo preparar la sincronización de empresas.",
+        error,
+      );
+      setCompanyUpdateError(
+        `No se pudo preparar la sincronización de empresas. Los cambios se conservaron localmente. ${empresaErrorMessage(error)}`,
+      );
+    }
   };
 
   const migrateLocalCompanies = async () => {
@@ -2737,85 +3403,146 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     companyMigrationInProgressRef.current = true;
     setIsMigratingCompanies(true);
     setCompanyMigrationError("");
+    let sessionUserId: string | null = null;
 
     try {
       const userId = await getCurrentUserId();
+      sessionUserId = userId;
       if (!userId) {
         throw new Error("No hay una sesión autenticada.");
       }
-
-      const existingRows = await listUserEmpresasHabituales();
-      const existingKeys = new Set(
-        existingRows.map((row) =>
-          recipientDuplicateKey(mapSupabaseEmpresaHabitualToLocal(row)),
-        ),
-      );
-      const failedCompanies: { company: EmpresaHabitual; error: unknown }[] =
-        [];
-
-      for (const company of companies) {
-        const key = recipientDuplicateKey(company);
-        if (existingKeys.has(key)) continue;
-
-        try {
-          const insertedRow = await insertUserEmpresaHabitual({
-            user_id: userId,
-            nombre: company.nombre,
-            direccion: company.direccion || null,
-            ciudad: company.ciudad || null,
-            codigo_postal: company.codigoPostal || null,
-            provincia: company.provincia || null,
-            pais: company.pais || null,
-            nif: company.nif || null,
-            telefono: company.telefono || null,
-            email: company.email || null,
-            contacto: company.contacto || null,
-            notas: company.notas || null,
-          });
-          existingKeys.add(
-            recipientDuplicateKey(
-              mapSupabaseEmpresaHabitualToLocal(insertedRow),
-            ),
-          );
-        } catch (error) {
-          failedCompanies.push({ company, error });
-        }
-      }
-
-      const refreshedRows = await listUserEmpresasHabituales();
-      const remoteCompanies = refreshedRows.map(
-        mapSupabaseEmpresaHabitualToLocal,
-      );
-      const remoteKeys = new Set(remoteCompanies.map(recipientDuplicateKey));
-      const pendingFailures = failedCompanies.filter(
-        ({ company }) => !remoteKeys.has(recipientDuplicateKey(company)),
-      );
-      const pendingCompanies = pendingFailures.map(({ company }) => company);
-
-      setCompanies([...remoteCompanies, ...pendingCompanies]);
-      setHasPendingCompanyMigration(pendingCompanies.length > 0);
-      setCompanyMigrationNotice(
-        pendingCompanies.length === 0
-          ? ""
-          : `Quedan ${pendingCompanies.length} empresas locales pendientes de sincronizar con Supabase.`,
-      );
-
-      if (pendingFailures.length > 0) {
-        const firstError = pendingFailures[0].error;
-        const details =
-          firstError instanceof Error ? ` ${firstError.message}` : "";
-        setCompanyMigrationError(
-          `No se pudieron sincronizar ${pendingCompanies.length} empresas. Se conservan localmente.${details}`,
+      if (companyUserIdRef.current !== userId) {
+        throw new Error(
+          "La sesión cambió. Recarga la sección antes de importar el respaldo local.",
         );
       }
+      const remoteRows = await listUserEmpresasHabituales();
+      if (!(await empresaSessionMatches(userId))) {
+        throw new Error("La sesión cambió durante la importación.");
+      }
+      const remoteCompanies = remoteRows.map(mapSupabaseEmpresaHabitualToLocal);
+      const backups = loadEmpresas().items;
+      const imported: EmpresaHabitual[] = [];
+      const plannedRemaps: { from: string; to: string }[] = [];
+      const forceSyncIds = new Set<string>();
+
+      for (const company of backups) {
+        const key = recipientDuplicateKey(company);
+        const candidates = [
+          ...companiesRef.current,
+          ...remoteCompanies,
+          ...imported,
+        ].filter(
+          (item) =>
+            item.id === company.id || recipientDuplicateKey(item) === key,
+        );
+
+        const candidateIds = new Set(candidates.map((item) => item.id));
+
+        const incompatible = candidates.some(
+          (item) =>
+            !empresaPayloadsEqual(
+              empresaPayloadFrom(item),
+              empresaPayloadFrom(company),
+            ),
+        );
+
+        if (incompatible || candidateIds.size > 1) {
+          throw new Error(
+            `El respaldo de "${company.nombre}" coincide con una empresa que tiene datos diferentes o con varios identificadores. No se incorpora el respaldo; revísalo antes de continuar.`,
+          );
+        }
+
+        const equivalent = candidates[0];
+
+        if (equivalent) {
+          const remoteEquivalent = remoteCompanies.find(
+            (item) => item.id === equivalent.id,
+          );
+
+          if (remoteEquivalent && remoteEquivalent.id !== company.id) {
+            plannedRemaps.push({
+              from: company.id,
+              to: remoteEquivalent.id,
+            });
+          }
+
+          if (
+            !remoteEquivalent &&
+            companiesRef.current.some((item) => item.id === equivalent.id)
+          ) {
+            forceSyncIds.add(equivalent.id);
+          }
+
+          continue;
+        }
+
+        imported.push(company);
+      }
+
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        throw new Error(
+          "La sesión cambió durante la preparación del respaldo.",
+        );
+      }
+
+      if (!applyEmpresaIdRemaps(plannedRemaps, userId)) {
+        throw new Error(
+          "No se pudieron guardar las evidencias de los identificadores remapeados. La importación se detuvo para no dejar referencias inconsistentes.",
+        );
+      }
+      await updateCompanies(
+        [...companiesRef.current, ...imported],
+        [...forceSyncIds],
+      );
+
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        return;
+      }
+
+      await scheduleEmpresaFlush(userId);
+
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        return;
+      }
+
+      const pending = readEmpresaJournal(userId).length;
+      setHasPendingCompanyMigration(
+        pending > 0 || loadEmpresas().items.length > 0,
+      );
+      setCompanySyncNotice(composeCompanySyncNotice(userId));
+      setCompanyMigrationNotice(
+        pending === 0
+          ? "El intento de sincronización terminó sin operaciones registradas como pendientes. Este resultado no confirma por sí solo que todo el respaldo esté sincronizado. El respaldo original se conserva."
+          : `Quedan ${pending} cambios de empresas pendientes de sincronizar. El respaldo original se conserva.`,
+      );
     } catch (error) {
       const details = error instanceof Error ? ` ${error.message}` : "";
-      setCompanyMigrationError(
-        `No se pudo completar la sincronización. Las empresas locales se conservan.${details}`,
-      );
+      if (
+        mountedRef.current &&
+        (!sessionUserId || companyUserIdRef.current === sessionUserId)
+      ) {
+        setCompanyMigrationError(
+          `No se pudo completar la sincronización. Las empresas locales se conservan.${details}`,
+        );
+      }
     } finally {
-      companyMigrationInProgressRef.current = false;
-      setIsMigratingCompanies(false);
+      if (!sessionUserId || companyUserIdRef.current === sessionUserId) {
+        companyMigrationInProgressRef.current = false;
+        setIsMigratingCompanies(false);
+      }
     }
   };
 
@@ -3600,7 +4327,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     if (!line.mercancia.trim()) {
       errors.mercancia = "La mercancía es obligatoria.";
     }
-    if (!/^\d+$/.test(line.numeroBultos.trim()) ||
+    if (
+      !/^\d+$/.test(line.numeroBultos.trim()) ||
       !Number.isSafeInteger(Number(line.numeroBultos)) ||
       Number(line.numeroBultos) < 0
     ) {
@@ -3835,8 +4563,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           ? []
           : [
               `Línea ${index + 1}: ${
-                nextResults[line.id]?.error ??
-                "No se pudo guardar este DeCA."
+                nextResults[line.id]?.error ?? "No se pudo guardar este DeCA."
               }`,
             ],
       );
@@ -3932,13 +4659,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           if (!refreshedIds.has(deca.id)) refreshedDecas.push(deca);
         }
         setDecas((current) => {
-          const merged = current.filter(
-            (deca) => !refreshedIds.has(deca.id),
-          );
+          const merged = current.filter((deca) => !refreshedIds.has(deca.id));
           return [...refreshedDecas, ...merged];
         });
       } catch (error) {
-        console.error("No se pudo recargar la lista de DeCAs importados.", error);
+        console.error(
+          "No se pudo recargar la lista de DeCAs importados.",
+          error,
+        );
         refreshError =
           " No se pudo actualizar la lista desde Supabase; las filas confirmadas se muestran localmente.";
         if (insertedDecas.length > 0) {
@@ -4019,6 +4747,22 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           </button>
         </nav>
 
+        {companyLoadError && (
+          <p
+            role="alert"
+            className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900"
+          >
+            {companyLoadError}
+          </p>
+        )}
+        {companySyncNotice && (
+          <p
+            role="status"
+            className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900"
+          >
+            {companySyncNotice}
+          </p>
+        )}
         {companyMigrationNotice && (
           <p
             role="status"
@@ -4027,7 +4771,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             {companyMigrationNotice}
           </p>
         )}
-        {hasPendingCompanyMigration && companies.length > 0 && (
+        {hasPendingCompanyMigration && (
           <button
             type="button"
             onClick={() => void migrateLocalCompanies()}
@@ -4257,10 +5001,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 className="mb-5 space-y-4 rounded-lg border border-blue-200 bg-white p-4"
               >
                 <div>
-                  <h2
-                    id="bulk-deca-title"
-                    className="font-bold text-slate-900"
-                  >
+                  <h2 id="bulk-deca-title" className="font-bold text-slate-900">
                     Crear DeCAs en bloque
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
@@ -4379,9 +5120,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                                     ]
                                       .filter(Boolean)
                                       .join(", ")}
-                                    {company.nif
-                                      ? ` · NIF ${company.nif}`
-                                      : ""}
+                                    {company.nif ? ` · NIF ${company.nif}` : ""}
                                   </span>
                                 </button>
                               </li>
@@ -4443,9 +5182,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                                   type="button"
                                   role="option"
                                   aria-selected={false}
-                                  onClick={() =>
-                                    selectBulkTransportista(item)
-                                  }
+                                  onClick={() => selectBulkTransportista(item)}
                                   className="w-full border-b border-slate-100 px-3 py-2.5 text-left hover:bg-blue-50"
                                 >
                                   <span className="block text-sm font-bold text-slate-800">
@@ -4470,16 +5207,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                         .length === 0 &&
                       transportistas.length > 0 && (
                         <p className="mt-1 text-xs text-slate-500">
-                          No hay coincidencias. Puedes introducirlo
-                          manualmente.
+                          No hay coincidencias. Puedes introducirlo manualmente.
                         </p>
                       )}
                   </div>
                   <div>
-                    <label
-                      className={labelClass}
-                      htmlFor="bulk-deca-plate"
-                    >
+                    <label className={labelClass} htmlFor="bulk-deca-plate">
                       Matrícula
                     </label>
                     <input
@@ -4493,9 +5226,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                           matriculaVehiculo: event.target.value,
                         }))
                       }
-                      aria-invalid={Boolean(
-                        bulkCommonErrors.matriculaVehiculo,
-                      )}
+                      aria-invalid={Boolean(bulkCommonErrors.matriculaVehiculo)}
                       aria-describedby={
                         bulkCommonErrors.matriculaVehiculo
                           ? "bulk-deca-plate-error"
@@ -4825,7 +5556,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     }
                     className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                   >
-                    <Plus aria-hidden="true" className="mr-1 inline" size={16} />
+                    <Plus
+                      aria-hidden="true"
+                      className="mr-1 inline"
+                      size={16}
+                    />
                     Añadir línea
                   </button>
                 </div>
@@ -4873,8 +5608,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   <p className="mt-1 text-sm text-slate-600">
                     El CSV debe incluir fecha (AAAA-MM-DD), cargador,
                     destinatario, ciudad_destino, mercancia, bultos y peso_kg.
-                    Todas las columnas son obligatorias; las filas importadas
-                    se crearán como borradores.
+                    Todas las columnas son obligatorias; las filas importadas se
+                    crearán como borradores.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -4972,8 +5707,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                         <ul className="space-y-1 text-xs text-amber-900">
                           {[...invalidCsvRows, ...duplicateCsvRows]
                             .sort(
-                              (left, right) =>
-                                left.rowNumber - right.rowNumber,
+                              (left, right) => left.rowNumber - right.rowNumber,
                             )
                             .map((row) => (
                               <li key={row.rowNumber}>
@@ -5922,7 +6656,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     type="submit"
                     disabled={Boolean(
                       (selectedDeCA && !isSelectedDeCADraft) ||
-                        (selectedDeCA && isRemoteEditSaving),
+                      (selectedDeCA && isRemoteEditSaving),
                     )}
                     className="w-full rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 sm:w-auto"
                   >
@@ -6303,42 +7037,41 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           </div>
         )}
 
-        {qrOpenDeCA &&
-          isValidHttpsPdfUrl(qrOpenDeCA.pdfPublicUrl) && (
-            <div
-              className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6"
-              role="presentation"
-              onClick={(event) => {
-                if (event.target === event.currentTarget) {
-                  setQrOpenDeCA(null);
-                }
-              }}
+        {qrOpenDeCA && isValidHttpsPdfUrl(qrOpenDeCA.pdfPublicUrl) && (
+          <div
+            className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6"
+            role="presentation"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) {
+                setQrOpenDeCA(null);
+              }
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="official-pdf-qr-title"
+              className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-2xl sm:p-6"
             >
-              <section
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="official-pdf-qr-title"
-                className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-2xl sm:p-6"
-              >
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <h2
-                    id="official-pdf-qr-title"
-                    className="text-lg font-black text-slate-900"
-                  >
-                    QR del PDF oficial
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => setQrOpenDeCA(null)}
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Cerrar
-                  </button>
-                </div>
-                <OfficialPdfQr url={qrOpenDeCA.pdfPublicUrl} />
-              </section>
-            </div>
-          )}
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2
+                  id="official-pdf-qr-title"
+                  className="text-lg font-black text-slate-900"
+                >
+                  QR del PDF oficial
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setQrOpenDeCA(null)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Cerrar
+                </button>
+              </div>
+              <OfficialPdfQr url={qrOpenDeCA.pdfPublicUrl} />
+            </section>
+          </div>
+        )}
 
         {plateManagerOpen && (
           <div
