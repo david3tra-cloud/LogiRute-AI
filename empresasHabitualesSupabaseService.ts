@@ -1,4 +1,4 @@
-﻿import { supabase } from "./lib/supabase";
+import { supabase } from "./lib/supabase";
 import type { Database } from "./database.types";
 import type { EmpresaHabitual } from "./types";
 import {
@@ -114,9 +114,7 @@ export async function loadUserEmpresaHabitualForDeCA(
 
   const requestedId = id?.trim();
   const resolvedId = requestedId
-    ? isUuid(requestedId)
-      ? requestedId
-      : loadEmpresaIdMap(userId)[requestedId]
+    ? loadEmpresaIdMap(userId)[requestedId] ?? requestedId
     : undefined;
   if (resolvedId && isUuid(resolvedId)) {
     const { data, error } = await supabase
