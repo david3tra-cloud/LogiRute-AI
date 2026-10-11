@@ -3,6 +3,9 @@ import { EmpresaHabitual } from "./types";
 export const EMPRESAS_STORAGE_KEY = "logiroute_empresas_v1";
 export const DESTINATARIOS_STORAGE_KEY = "logiroute_destinatarios_v1";
 
+const userStorageKey = (key: string, userId?: string) =>
+  userId ? `${key}:${encodeURIComponent(userId)}` : key;
+
 export type EmpresaLoadResult = {
   items: EmpresaHabitual[];
   invalid: boolean;
@@ -112,15 +115,17 @@ const isLegacyRecipient = (
   );
 };
 
-export const loadEmpresas = (): EmpresaLoadResult => {
+export const loadEmpresas = (userId?: string): EmpresaLoadResult => {
   try {
-    const saved = localStorage.getItem(EMPRESAS_STORAGE_KEY);
+    const saved = localStorage.getItem(
+      userStorageKey(EMPRESAS_STORAGE_KEY, userId),
+    );
     if (saved !== null && saved.trim()) {
       const parsed: unknown = JSON.parse(saved);
       if (!Array.isArray(parsed) || !parsed.every(isEmpresaHabitual)) {
         return { items: [], invalid: true, migrated: false, migratedCount: 0 };
       }
-      if (parsed.length) {
+      if (parsed.length || userId) {
         return {
           items: parsed,
           invalid: false,
@@ -128,6 +133,10 @@ export const loadEmpresas = (): EmpresaLoadResult => {
           migratedCount: 0,
         };
       }
+    }
+
+    if (userId) {
+      return { items: [], invalid: false, migrated: false, migratedCount: 0 };
     }
 
     const legacy = localStorage.getItem(DESTINATARIOS_STORAGE_KEY);
@@ -161,6 +170,21 @@ export const loadEmpresas = (): EmpresaLoadResult => {
     };
   } catch {
     return { items: [], invalid: true, migrated: false, migratedCount: 0 };
+  }
+};
+
+export const saveEmpresas = (
+  items: EmpresaHabitual[],
+  userId?: string,
+): boolean => {
+  try {
+    localStorage.setItem(
+      userStorageKey(EMPRESAS_STORAGE_KEY, userId),
+      JSON.stringify(items),
+    );
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -306,9 +330,7 @@ export const previewEmpresasCsv = (
       if (!fields.pais) fields.pais = "España";
       const timestamp = new Date().toISOString();
       const empresa: EmpresaHabitual = {
-        id:
-          globalThis.crypto?.randomUUID?.() ??
-          `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+        id: createRecipientId(),
         ...fields,
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -352,6 +374,340 @@ export const empresasToCsv = (recipients: EmpresaHabitual[]) => {
 export const empresaTemplateCsv = () =>
   `\uFEFF${CSV_HEADERS.join(";")}\r\nCliente Ejemplo S.L.;Calle Ejemplo 12;Valencia;46001;Valencia;España;B12345678;600000000;ejemplo@empresa.test;Persona de contacto;Registro de ejemplo`;
 
-export const createRecipientId = () =>
-  globalThis.crypto?.randomUUID?.() ??
-  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+export const isUuid = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+
+const uuidFromRandomBytes = (): string => {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+};
+
+/**
+ * Genera siempre un UUID v4 válido. Nunca devuelve el antiguo fallback
+ * `Date.now()-random`, que no puede enviarse a columnas o filtros UUID.
+ * Si el entorno no expone criptografía segura, lanza un error en lugar
+ * de crear un identificador no válido.
+ */
+export const createRecipientId = (): string => {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  if (globalThis.crypto?.getRandomValues) return uuidFromRandomBytes();
+  throw new Error(
+    "No se pudo generar un identificador de empresa seguro en este navegador.",
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Pendientes duraderos de empresas (localStorage por origen/navegador).
+// Cada operación guarda el usuario propietario para no mezclar cuentas.
+// ---------------------------------------------------------------------------
+
+export type EmpresaPayload = {
+  nombre: string;
+  direccion: string;
+  ciudad: string;
+  codigoPostal: string;
+  provincia: string;
+  pais: string;
+  nif: string;
+  telefono: string;
+  email: string;
+  contacto: string;
+  notas: string;
+};
+
+export type EmpresaPendingOp = {
+  userId: string;
+  kind: "insert" | "update";
+  localId: string;
+  targetId: string;
+  revision: number;
+  payload: EmpresaPayload;
+  /**
+   * Evidencia durable del payload exacto enviado en el último INSERT.
+   * Se persiste antes de llamar al servidor y se conserva hasta que la
+   * transición a "update" o la confirmación final queden guardadas.
+   */
+  insertedPayload?: EmpresaPayload;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const EMPRESAS_PENDING_OPS_STORAGE_KEY =
+  "logiroute_empresas_pending_ops_v1";
+export const EMPRESAS_ID_MAP_STORAGE_KEY = "logiroute_empresas_id_map_v1";
+
+export const empresaPayloadFrom = (
+  empresa: EmpresaHabitual,
+): EmpresaPayload => ({
+  nombre: empresa.nombre,
+  direccion: empresa.direccion,
+  ciudad: empresa.ciudad,
+  codigoPostal: empresa.codigoPostal,
+  provincia: empresa.provincia,
+  pais: empresa.pais,
+  nif: empresa.nif,
+  telefono: empresa.telefono,
+  email: empresa.email,
+  contacto: empresa.contacto,
+  notas: empresa.notas,
+});
+
+export const empresaPayloadsEqual = (
+  a: EmpresaPayload,
+  b: EmpresaPayload,
+): boolean =>
+  (Object.keys(a) as (keyof EmpresaPayload)[]).every(
+    (key) => a[key] === b[key],
+  );
+
+export const empresaBusinessFieldsEqual = (
+  a: EmpresaHabitual,
+  b: EmpresaHabitual,
+): boolean =>
+  empresaPayloadsEqual(empresaPayloadFrom(a), empresaPayloadFrom(b));
+
+const isEmpresaPayload = (value: unknown): value is EmpresaPayload => {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Record<string, unknown>;
+  return [
+    "nombre",
+    "direccion",
+    "ciudad",
+    "codigoPostal",
+    "provincia",
+    "pais",
+    "nif",
+    "telefono",
+    "email",
+    "contacto",
+    "notas",
+  ].every((key) => typeof payload[key] === "string");
+};
+
+const isEmpresaPendingOp = (value: unknown): value is EmpresaPendingOp => {
+  if (!value || typeof value !== "object") return false;
+  const op = value as Record<string, unknown>;
+  return (
+    typeof op.userId === "string" &&
+    op.userId.length > 0 &&
+    (op.kind === "insert" || op.kind === "update") &&
+    typeof op.localId === "string" &&
+    isUuid(op.targetId) &&
+    typeof op.revision === "number" &&
+    isEmpresaPayload(op.payload) &&
+    (op.insertedPayload === undefined ||
+      isEmpresaPayload(op.insertedPayload)) &&
+    typeof op.createdAt === "string" &&
+    typeof op.updatedAt === "string"
+  );
+};
+
+export type EmpresaPendingOpLoad = {
+  ops: EmpresaPendingOp[];
+  invalid: boolean;
+};
+
+export const loadEmpresaPendingOps = (): EmpresaPendingOpLoad => {
+  try {
+    const saved = localStorage.getItem(EMPRESAS_PENDING_OPS_STORAGE_KEY);
+    if (saved === null) return { ops: [], invalid: false };
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return { ops: [], invalid: true };
+    const ops = parsed.filter(isEmpresaPendingOp);
+    return { ops, invalid: ops.length !== parsed.length };
+  } catch {
+    return { ops: [], invalid: true };
+  }
+};
+
+export const loadEmpresaPendingOpsForUser = (
+  userId: string,
+): EmpresaPendingOpLoad => {
+  try {
+    const scopedKey = userStorageKey(EMPRESAS_PENDING_OPS_STORAGE_KEY, userId);
+    const scopedSaved = localStorage.getItem(scopedKey);
+    const saved =
+      scopedSaved ?? localStorage.getItem(EMPRESAS_PENDING_OPS_STORAGE_KEY);
+    if (saved === null) return { ops: [], invalid: false };
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return { ops: [], invalid: true };
+    const validOps = parsed.filter(isEmpresaPendingOp);
+    const ops = validOps.filter((op) => op.userId === userId);
+    return {
+      ops,
+      invalid: validOps.length !== parsed.length,
+    };
+  } catch {
+    return { ops: [], invalid: true };
+  }
+};
+
+export const saveEmpresaPendingOps = (ops: EmpresaPendingOp[]): boolean => {
+  try {
+    localStorage.setItem(EMPRESAS_PENDING_OPS_STORAGE_KEY, JSON.stringify(ops));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const saveEmpresaPendingOpsForUser = (
+  userId: string,
+  ops: EmpresaPendingOp[],
+): boolean => {
+  if (ops.some((op) => op.userId !== userId)) return false;
+  try {
+    localStorage.setItem(
+      userStorageKey(EMPRESAS_PENDING_OPS_STORAGE_KEY, userId),
+      JSON.stringify(ops),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const loadEmpresaIdMap = (userId?: string): Record<string, string> => {
+  try {
+    const saved = localStorage.getItem(
+      userStorageKey(EMPRESAS_ID_MAP_STORAGE_KEY, userId),
+    );
+    if (saved === null) return {};
+    const parsed: unknown = JSON.parse(saved);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const idMap: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (isUuid(value)) {
+        idMap[key] = value;
+      }
+    }
+
+    return idMap;
+  } catch {
+    return {};
+  }
+};
+
+export const saveEmpresaIdMap = (
+  map: Record<string, string>,
+  userId?: string,
+): boolean => {
+  try {
+    localStorage.setItem(
+      userStorageKey(EMPRESAS_ID_MAP_STORAGE_KEY, userId),
+      JSON.stringify(map),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export type EmpresaMergeResult = {
+  rows: EmpresaHabitual[];
+  remaps: { from: string; to: string }[];
+  ambiguous: boolean;
+  localOnlyCount: number;
+};
+
+/**
+ * Fusiona el estado local con la lista remota sin sobrescribir cambios
+ * pendientes:
+ * - filas con operaciones pendientes: se conserva la versión local;
+ * - filas sincronizadas sin pendientes: gana la versión remota;
+ * - filas locales sin equivalente remoto: se conservan (respaldo);
+ * - coincidencias por recipientDuplicateKey con id distinto: si el contenido
+ *   coincide se adopta el id remoto; si difiere o hay varias coincidencias,
+ *   se conserva lo local y se marca ambigüedad.
+ */
+export const mergeEmpresaState = (
+  localRows: EmpresaHabitual[],
+  remoteRows: EmpresaHabitual[],
+  pendingOps: EmpresaPendingOp[],
+): EmpresaMergeResult => {
+  const pendingIds = new Set<string>();
+  pendingOps.forEach((op) => {
+    pendingIds.add(op.localId);
+    pendingIds.add(op.targetId);
+  });
+
+  const remoteByKey = new Map<string, EmpresaHabitual[]>();
+  remoteRows.forEach((row) => {
+    const key = recipientDuplicateKey(row);
+    const bucket = remoteByKey.get(key);
+    if (bucket) bucket.push(row);
+    else remoteByKey.set(key, [row]);
+  });
+
+  const rows: EmpresaHabitual[] = [];
+  const remaps: { from: string; to: string }[] = [];
+  const consumedRemoteIds = new Set<string>();
+  const excludedRemoteIds = new Set<string>();
+  let ambiguous = false;
+  let localOnlyCount = 0;
+
+  for (const local of localRows) {
+    if (pendingIds.has(local.id)) {
+      rows.push(local);
+      continue;
+    }
+    const sameRow = remoteRows.find((row) => row.id === local.id);
+    if (sameRow) {
+      rows.push({ ...local, ...sameRow });
+      consumedRemoteIds.add(sameRow.id);
+      continue;
+    }
+    const matches = remoteByKey.get(recipientDuplicateKey(local)) ?? [];
+    if (matches.length === 1) {
+      const match = matches[0];
+      if (empresaBusinessFieldsEqual(local, match)) {
+        if (match.id !== local.id)
+          remaps.push({ from: local.id, to: match.id });
+        rows.push({ ...local, id: match.id });
+        consumedRemoteIds.add(match.id);
+      } else {
+        rows.push(local);
+        excludedRemoteIds.add(match.id);
+        ambiguous = true;
+      }
+    } else if (matches.length > 1) {
+      rows.push(local);
+      matches.forEach((match) => excludedRemoteIds.add(match.id));
+      ambiguous = true;
+    } else {
+      rows.push(local);
+      localOnlyCount += 1;
+    }
+  }
+
+  for (const remote of remoteRows) {
+    if (consumedRemoteIds.has(remote.id) || excludedRemoteIds.has(remote.id)) {
+      continue;
+    }
+    if (pendingIds.has(remote.id)) continue;
+    rows.push(remote);
+  }
+
+  return { rows, remaps, ambiguous, localOnlyCount };
+};
