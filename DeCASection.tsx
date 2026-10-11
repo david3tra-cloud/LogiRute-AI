@@ -1949,6 +1949,17 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     }
 
     const journal = readEmpresaJournal(userId);
+    if (journal.some((op) => fromIds.has(op.localId) &&
+        (op.kind === "update" || op.insertedPayload !== undefined))) {
+      setCompanyUpdateError("No se remapea una empresa con una escritura remota pendiente o incierta. Confirma primero la operación original.");
+      return false;
+    }
+    const pendingIdsAfterRemap = journal.map((op) =>
+      lastTargetByFrom.get(op.localId) ?? op.localId);
+    if (new Set(pendingIdsAfterRemap).size !== pendingIdsAfterRemap.length) {
+      setCompanyUpdateError("El remapeo uniría operaciones pendientes distintas. Se conserva el diario sin fusionarlas.");
+      return false;
+    }
     let journalChanged = false;
     const nextJournal = journal.map((op) => {
       if (op.userId !== userId || !fromIds.has(op.localId)) return op;
@@ -1983,6 +1994,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       const target = lastTargetByFrom.get(company.id);
       return target ? { ...company, id: target } : company;
     });
+    if (!persistEmpresaRows(nextCompanies, userId)) {
+      setCompanyUpdateError("No se pudo guardar la lista remapeada. Se conservan el mapa y el diario para recuperar el cambio.");
+      return false;
+    }
+    empresaMutationVersionRef.current += 1;
     companiesRef.current = nextCompanies;
     setCompanies(nextCompanies);
     setDecas((current) =>
@@ -2005,7 +2021,6 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         setForm(nextForm);
       }
     }
-    persistEmpresaRows(nextCompanies, userId);
     return true;
   };
 
@@ -2073,6 +2088,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
       if (op.kind === "insert") {
         if (!row) {
+          const insertPayload = op.insertedPayload ?? op.payload;
           // Evidencia durable del payload que se va a enviar: se guarda
           // antes de llamar al INSERT; si no puede guardarse, no se envía.
           const evidenceJournal = readEmpresaJournal(userId);
@@ -2085,7 +2101,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           if (evidenceIndex < 0) return;
           evidenceJournal[evidenceIndex] = {
             ...evidenceJournal[evidenceIndex],
-            insertedPayload: op.payload,
+            insertedPayload: insertPayload,
             updatedAt: new Date().toISOString(),
           };
           if (!saveEmpresaPendingOpsForUser(userId, evidenceJournal)) {
@@ -2100,7 +2116,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               {
                 id: op.targetId,
                 user_id: userId,
-                ...toEmpresaWriteFields(op.payload),
+                ...toEmpresaWriteFields(insertPayload),
               },
               userId,
             );
@@ -2271,9 +2287,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         const next = companiesRef.current.map((company) =>
           company.id === op.localId ? { ...company, ...synced } : company,
         );
+        if (!persistEmpresaRows(next, userId)) {
+          throw new Error("La escritura remota se confirmó, pero no se pudo guardar la lista local. Se conserva la lista actual.");
+        }
         companiesRef.current = next;
         setCompanies(next);
-        persistEmpresaRows(next, userId);
       }
     }
     if (await empresaSessionMatches(userId)) {
@@ -2305,7 +2323,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
       setCompanySyncNotice(composeCompanySyncNotice(userId));
     });
-    return empresaQueueRef.current;
+    return task;
   };
 
   const applyRemoteEmpresaRows = (
@@ -2326,11 +2344,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
       return;
     }
+    if (!persistEmpresaRows(merged.rows, userId)) {
+      setCompanyLoadError("No se pudo guardar la lista fusionada. La lista remota no se publicó.");
+      return;
+    }
     empresaMergeAmbiguityRef.current = merged.ambiguous;
     remoteEmpresaIdsRef.current = new Set(remoteRows.map((row) => row.id));
     companiesRef.current = merged.rows;
     setCompanies(merged.rows);
-    persistEmpresaRows(merged.rows, userId);
     setCompanyLoadError("");
     setCompanySyncNotice(composeCompanySyncNotice(userId));
     setHasPendingCompanyMigration(
@@ -2359,6 +2380,31 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
       const local = loadEmpresas(sessionUserId ?? undefined);
       if (local.invalid) setCompanyStorageWarning(true);
+      companiesRef.current = local.items;
+      setCompanies(local.items);
+
+      if (sessionUserId) {
+        const storedMap = loadEmpresaIdMap(sessionUserId);
+        const storedRemaps: { from: string; to: string }[] = [];
+        for (const from of Object.keys(storedMap)) {
+          let to = from;
+          const visited = new Set<string>();
+          while (storedMap[to] && storedMap[to] !== to) {
+            if (visited.has(to)) {
+              setCompanyLoadError("El mapa de empresas contiene un ciclo. Se conserva el respaldo y se detiene la sincronización automática.");
+              return;
+            }
+            visited.add(to);
+            to = storedMap[to];
+          }
+          if (to !== from) storedRemaps.push({ from, to });
+        }
+        if (!applyEmpresaIdRemaps(storedRemaps, sessionUserId)) {
+          setCompanyLoadError("No se pudo recuperar el remapeo local. Se conserva el respaldo y se detiene la sincronización automática.");
+          return;
+        }
+        local.items = companiesRef.current;
+      }
 
       const pendingOps = sessionUserId ? readEmpresaJournal(sessionUserId) : [];
 
@@ -2393,8 +2439,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       companiesRef.current = recoveredRows;
       setCompanies(recoveredRows);
 
-      if (sessionUserId && pendingOps.length > 0) {
-        persistEmpresaRows(recoveredRows, sessionUserId);
+      if (sessionUserId && pendingOps.length > 0 &&
+          !persistEmpresaRows(recoveredRows, sessionUserId)) {
+        setCompanyLoadError("No se pudo guardar la lista recuperada del diario. Se conserva la evidencia y no se inicia la sincronización automática.");
+        return;
       }
 
       const unownedBackup = sessionUserId ? loadEmpresas().items : [];
@@ -3242,7 +3290,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const updateCompanies = async (
     next: EmpresaHabitual[],
     forceSyncIds: readonly string[] = [],
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const requestedSyncIds = new Set(forceSyncIds);
     empresaMutationVersionRef.current += 1;
     const previous = companiesRef.current;
@@ -3275,7 +3323,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         // Con sesión, las evidencias (mapa y diario) se guardan antes de
         // tocar el estado; sin sesión solo se renombran en memoria.
         if (userId && !applyEmpresaIdRemaps(plannedRemaps, userId)) {
-          return;
+          return false;
         }
         const newIdByOldId = new Map(
           plannedRemaps.map((entry) => [entry.from, entry.to]),
@@ -3289,7 +3337,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       setCompanyUpdateError(
         `No se pudo preparar el identificador seguro de una empresa. Los datos siguen disponibles localmente. ${empresaErrorMessage(error)}`,
       );
-      return;
+      return false;
     }
 
     changedCompanies = nextItems.filter((company) => {
@@ -3320,7 +3368,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           setCompanyUpdateError(
             `No se pudo crear una operación válida para "${company.nombre}".`,
           );
-          return;
+          return false;
         }
         const operation: EmpresaPendingOp = {
           userId,
@@ -3347,7 +3395,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         setCompanyUpdateError(
           "No se pudieron guardar de forma duradera los cambios pendientes. No se aplicó la nueva lista para no dejar ediciones sin pendiente recuperable.",
         );
-        return;
+        return false;
       }
       setHasPendingCompanyMigration(
         journal.length > 0 || loadEmpresas().items.length > 0,
@@ -3355,10 +3403,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       setCompanySyncNotice(composeCompanySyncNotice(userId));
     }
 
+    if (!persistEmpresaRows(nextItems, userId)) {
+      setCompanyUpdateError("No se pudo guardar la lista local. Se conservan los pendientes recuperables; la operación se detuvo.");
+      return false;
+    }
     companiesRef.current = nextItems;
     setCompanies(nextItems);
-    const persisted = persistEmpresaRows(nextItems, userId);
-    setCompanyStorageWarning(!persisted);
     setCompanyUpdateError("");
     if (!userId) {
       if (changedCompanies.length > 0) {
@@ -3367,9 +3417,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           "Los cambios locales de empresas todavía no están asociados a una cuenta.",
         );
       }
-      return;
+      return true;
     }
-    if (!changedCompanies.length) return;
+    if (!changedCompanies.length) return true;
 
     try {
       if (!(await empresaSessionMatches(userId))) {
@@ -3378,12 +3428,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             "La sesión cambió; los cambios se conservaron pendientes en su cuenta original y no se enviaron a otra cuenta.",
           );
         }
-        return;
+        return false;
       }
       await scheduleEmpresaFlush(userId);
     } catch (error) {
       if (!mountedRef.current || companyUserIdRef.current !== userId) {
-        return;
+        return false;
       }
       console.error(
         "No se pudo preparar la sincronización de empresas.",
@@ -3392,7 +3442,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       setCompanyUpdateError(
         `No se pudo preparar la sincronización de empresas. Los cambios se conservaron localmente. ${empresaErrorMessage(error)}`,
       );
+      return false;
     }
+    return mountedRef.current && companyUserIdRef.current === userId;
   };
 
   const migrateLocalCompanies = async () => {
@@ -3495,10 +3547,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           "No se pudieron guardar las evidencias de los identificadores remapeados. La importación se detuvo para no dejar referencias inconsistentes.",
         );
       }
-      await updateCompanies(
+      const prepared = await updateCompanies(
         [...companiesRef.current, ...imported],
         [...forceSyncIds],
       );
+      if (!prepared) {
+        throw new Error("La actualización de empresas falló. La importación se detuvo y el respaldo original se conserva.");
+      }
 
       if (
         !mountedRef.current ||
@@ -4282,7 +4337,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const duplicateCsvRows =
     decaCsvPreview?.rows.filter((row) => row.duplicate) ?? [];
 
-  const bulkCommonErrors: Partial<Record<"fecha" | "cargador", string>> = {};
+  const bulkCommonErrors: Partial<Record<"fecha" | "cargador" | "matriculaVehiculo", string>> = {};
   if (!bulkCommon.fecha.trim()) {
     bulkCommonErrors.fecha = "La fecha es obligatoria.";
   } else {
@@ -4348,7 +4403,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     Object.keys(bulkCommonErrors).length > 0 ||
     bulkLines.length === 0 ||
     bulkLineErrors.some((errors) => Object.keys(errors).length > 0);
-  const hasSavedBulkLines = Object.values(bulkResults).some(
+  const hasSavedBulkLines = Object.values<BulkDeCALineResult>(bulkResults).some(
     (result) => result.saved,
   );
 
@@ -4555,7 +4610,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         }
       }
 
-      const savedCount = Object.values(nextResults).filter(
+      const savedCount = Object.values<BulkDeCALineResult>(nextResults).filter(
         (result) => result.saved,
       ).length;
       const failedLines = bulkLines.flatMap((line, index) =>
