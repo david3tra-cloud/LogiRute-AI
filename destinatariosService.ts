@@ -431,12 +431,20 @@ export type EmpresaPayload = {
   notas: string;
 };
 
-export type EmpresaPendingOp = {
+type EmpresaPendingOpBase = {
   userId: string;
-  kind: "insert" | "update";
   localId: string;
   targetId: string;
   revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Alta o edición pendiente: exige payload con el contenido a sincronizar.
+ */
+export type EmpresaPendingWriteOp = EmpresaPendingOpBase & {
+  kind: "insert" | "update";
   payload: EmpresaPayload;
   /**
    * Evidencia durable del payload exacto enviado en el último INSERT.
@@ -444,9 +452,17 @@ export type EmpresaPendingOp = {
    * transición a "update" o la confirmación final queden guardadas.
    */
   insertedPayload?: EmpresaPayload;
-  createdAt: string;
-  updatedAt: string;
 };
+
+/**
+ * Borrado pendiente: no lleva payload; su presencia impide que la fila
+ * (local o remota con `targetId`) reaparezca en cargas o fusión.
+ */
+export type EmpresaPendingDeleteOp = EmpresaPendingOpBase & {
+  kind: "delete";
+};
+
+export type EmpresaPendingOp = EmpresaPendingWriteOp | EmpresaPendingDeleteOp;
 
 export const EMPRESAS_PENDING_OPS_STORAGE_KEY =
   "logiroute_empresas_pending_ops_v1";
@@ -503,18 +519,21 @@ const isEmpresaPayload = (value: unknown): value is EmpresaPayload => {
 const isEmpresaPendingOp = (value: unknown): value is EmpresaPendingOp => {
   if (!value || typeof value !== "object") return false;
   const op = value as Record<string, unknown>;
-  return (
+  const baseValid =
     typeof op.userId === "string" &&
     op.userId.length > 0 &&
-    (op.kind === "insert" || op.kind === "update") &&
     typeof op.localId === "string" &&
     isUuid(op.targetId) &&
     typeof op.revision === "number" &&
+    typeof op.createdAt === "string" &&
+    typeof op.updatedAt === "string";
+  if (!baseValid) return false;
+  if (op.kind === "delete") return true;
+  if (op.kind !== "insert" && op.kind !== "update") return false;
+  return (
     isEmpresaPayload(op.payload) &&
     (op.insertedPayload === undefined ||
-      isEmpresaPayload(op.insertedPayload)) &&
-    typeof op.createdAt === "string" &&
-    typeof op.updatedAt === "string"
+      isEmpresaPayload(op.insertedPayload))
   );
 };
 
@@ -633,8 +652,9 @@ export type EmpresaMergeResult = {
 
 /**
  * Fusiona el estado local con la lista remota sin sobrescribir cambios
- * pendientes:
+ * pendientes (solo operaciones de `userId`; nunca las de otra cuenta):
  * - filas con operaciones pendientes: se conserva la versión local;
+ * - filas con borrado pendiente: se excluyen local y remotamente;
  * - filas sincronizadas sin pendientes: gana la versión remota;
  * - filas locales sin equivalente remoto: se conservan (respaldo);
  * - coincidencias por recipientDuplicateKey con id distinto: si el contenido
@@ -645,11 +665,18 @@ export const mergeEmpresaState = (
   localRows: EmpresaHabitual[],
   remoteRows: EmpresaHabitual[],
   pendingOps: EmpresaPendingOp[],
+  userId: string,
 ): EmpresaMergeResult => {
+  const scopedOps = pendingOps.filter((op) => op.userId === userId);
   const pendingIds = new Set<string>();
-  pendingOps.forEach((op) => {
+  const deletedIds = new Set<string>();
+  scopedOps.forEach((op) => {
     pendingIds.add(op.localId);
     pendingIds.add(op.targetId);
+    if (op.kind === "delete") {
+      deletedIds.add(op.localId);
+      deletedIds.add(op.targetId);
+    }
   });
 
   const remoteByKey = new Map<string, EmpresaHabitual[]>();
@@ -668,6 +695,7 @@ export const mergeEmpresaState = (
   let localOnlyCount = 0;
 
   for (const local of localRows) {
+    if (deletedIds.has(local.id)) continue;
     if (pendingIds.has(local.id)) {
       rows.push(local);
       continue;

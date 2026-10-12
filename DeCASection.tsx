@@ -3,6 +3,7 @@ import DeCAListCard from "./DeCAListCard";
 import QRCode from "qrcode";
 import { supabase } from "./lib/supabase";
 import {
+  deleteUserEmpresaHabitual,
   getEmpresaRowByIdForUser,
   insertUserEmpresaHabitual,
   listUserEmpresasHabituales,
@@ -51,7 +52,9 @@ import {
   saveEmpresas,
   saveEmpresaIdMap,
   saveEmpresaPendingOpsForUser,
+  type EmpresaPendingDeleteOp,
   type EmpresaPendingOp,
+  type EmpresaPendingWriteOp,
   type EmpresaPayload,
 } from "./destinatariosService";
 import {
@@ -1951,7 +1954,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
     const journal = readEmpresaJournal(userId);
     if (journal.some((op) => fromIds.has(op.localId) &&
-        (op.kind === "update" || op.insertedPayload !== undefined))) {
+        (op.kind === "update" ||
+          (op.kind === "insert" && op.insertedPayload !== undefined)))) {
       setCompanyUpdateError("No se remapea una empresa con una escritura remota pendiente o incierta. Confirma primero la operación original.");
       return false;
     }
@@ -2034,13 +2038,15 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     userId: string,
     localId: string,
     revision: number,
+    kind: EmpresaPendingOp["kind"],
   ): boolean => {
     const journal = readEmpresaJournal(userId);
     const index = journal.findIndex(
       (op) =>
         op.userId === userId &&
         op.localId === localId &&
-        op.revision === revision,
+        op.revision === revision &&
+        op.kind === kind,
     );
     if (index < 0) return false;
     journal.splice(index, 1);
@@ -2068,6 +2074,110 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     notas: payload.notas || null,
   });
 
+  /**
+   * Confirma y retira un borrado pendiente. Solo retira la operación si
+   * sigue coincidiendo su revisión y su tipo; si la fila remota ya no
+   * existe (antes o tras la llamada) se considera borrada y no es un fallo.
+   * Un fallo real conserva la intención pendiente y lanza error.
+   */
+  const confirmEmpresaDeleteOp = async (
+    userId: string,
+    localId: string,
+    op: EmpresaPendingDeleteOp,
+  ): Promise<void> => {
+    if (
+      !mountedRef.current ||
+      companyUserIdRef.current !== userId ||
+      !(await empresaSessionMatches(userId))
+    ) {
+      return;
+    }
+
+    const row = await getEmpresaRowByIdForUser(op.targetId, userId);
+    if (
+      !mountedRef.current ||
+      companyUserIdRef.current !== userId ||
+      !(await empresaSessionMatches(userId))
+    ) {
+      return;
+    }
+
+    if (row && row.user_id !== userId) {
+      throw new Error(
+        `No se pudo eliminar la empresa "${op.targetId}": la fila remota pertenece a otra cuenta. Se conserva el borrado pendiente.`,
+      );
+    }
+
+    if (row) {
+      const result = await deleteUserEmpresaHabitual(op.targetId, userId);
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        !(await empresaSessionMatches(userId))
+      ) {
+        return;
+      }
+      if (!result.deleted) {
+        const after = await getEmpresaRowByIdForUser(op.targetId, userId);
+        if (
+          !mountedRef.current ||
+          companyUserIdRef.current !== userId ||
+          !(await empresaSessionMatches(userId))
+        ) {
+          return;
+        }
+        if (after) {
+          throw new Error(
+            `No se pudo confirmar la eliminación de la empresa "${op.targetId}": la fila sigue presente y el servidor no reportó ninguna fila eliminada. Se conserva el borrado pendiente para reintentarlo.`,
+          );
+        }
+      }
+    }
+
+    // Evidencia: la fila ya no existe en el servidor (borrada ahora o
+    // antes). Se incrementa la versión de mutación para que cualquier carga
+    // remota iniciada antes de este momento se descarte y no resucite la
+    // empresa (el guardia de versión vive en la carga automática).
+    empresaMutationVersionRef.current += 1;
+    remoteEmpresaIdsRef.current.delete(op.targetId);
+
+    const removed = removeEmpresaPendingOp(
+      userId,
+      localId,
+      op.revision,
+      "delete",
+    );
+    const remaining = findEmpresaPendingOp(userId, localId);
+    if (
+      !removed &&
+      remaining &&
+      remaining.revision === op.revision &&
+      remaining.kind === "delete"
+    ) {
+      throw new Error(
+        "La eliminación se confirmó, pero no se pudo retirar su pendiente del almacenamiento local.",
+      );
+    }
+    if (remaining) {
+      // Surgió una operación nueva (la empresa se volvió a crear): no se
+      // toca la lista local ni se retira la operación posterior.
+      return;
+    }
+
+    if (companiesRef.current.some((company) => company.id === localId)) {
+      const next = companiesRef.current.filter(
+        (company) => company.id !== localId,
+      );
+      if (!persistEmpresaRows(next, userId)) {
+        throw new Error(
+          "La eliminación se confirmó, pero no se pudo guardar la lista local. Se conserva el estado actual.",
+        );
+      }
+      companiesRef.current = next;
+      setCompanies(next);
+    }
+  };
+
   const flushEmpresaJournal = async (userId: string): Promise<void> => {
     if (!mountedRef.current || companyUserIdRef.current !== userId) return;
     const localIds = [
@@ -2077,6 +2187,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     for (const localId of localIds) {
       const op = findEmpresaPendingOp(userId, localId);
       if (!op || !(await empresaSessionMatches(userId))) return;
+      if (op.kind === "delete") {
+        await confirmEmpresaDeleteOp(userId, localId, op);
+        continue;
+      }
 
       let row = await getEmpresaRowByIdForUser(op.targetId, userId);
       if (
@@ -2085,6 +2199,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         !(await empresaSessionMatches(userId))
       ) {
         return;
+      }
+
+      // El diario pudo cambiar durante las consultas anteriores (por
+      // ejemplo, un borrado solicitado mientras se leía la fila).
+      const pendingBeforeWrite = findEmpresaPendingOp(userId, localId);
+      if (pendingBeforeWrite?.kind === "delete") {
+        await confirmEmpresaDeleteOp(userId, localId, pendingBeforeWrite);
+        continue;
       }
 
       if (op.kind === "insert") {
@@ -2100,8 +2222,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               entry.targetId === op.targetId,
           );
           if (evidenceIndex < 0) return;
+          const evidenceEntry = evidenceJournal[evidenceIndex];
+          if (evidenceEntry.kind === "delete") return;
           evidenceJournal[evidenceIndex] = {
-            ...evidenceJournal[evidenceIndex],
+            ...evidenceEntry,
             insertedPayload: insertPayload,
             updatedAt: new Date().toISOString(),
           };
@@ -2136,6 +2260,15 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           }
         }
 
+        // Si el borrado se solicitó mientras el INSERT estaba en curso, la
+        // fila recién insertada se elimina ahora mismo (sin publicarla y sin
+        // esperar a otra recarga) usando el targetId realmente insertado.
+        const pendingAfterInsert = findEmpresaPendingOp(userId, localId);
+        if (pendingAfterInsert?.kind === "delete") {
+          await confirmEmpresaDeleteOp(userId, localId, pendingAfterInsert);
+          continue;
+        }
+
         if (row.user_id !== userId) {
           throw new Error(
             `Conflicto al insertar "${op.payload.nombre}": la fila existente pertenece a otra cuenta. Se conserva el cambio pendiente sin sobrescribirla.`,
@@ -2167,10 +2300,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               entry.targetId === op.targetId,
           );
           if (conversionIndex < 0) return;
-          conversionJournal[conversionIndex] = {
-            ...conversionJournal[conversionIndex],
+          const conversionEntry = conversionJournal[conversionIndex];
+          if (conversionEntry.kind === "delete") return;
+          const convertedEntry: EmpresaPendingWriteOp = {
+            ...conversionEntry,
             kind: "update",
           };
+          conversionJournal[conversionIndex] = convertedEntry;
           if (!saveEmpresaPendingOpsForUser(userId, conversionJournal)) {
             setCompanyStorageWarning(true);
             throw new Error(
@@ -2180,7 +2316,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           if (!(await empresaSessionMatches(userId))) return;
           await updateUserEmpresaHabitual(
             op.targetId,
-            toEmpresaWriteFields(conversionJournal[conversionIndex].payload),
+            toEmpresaWriteFields(convertedEntry.payload),
             userId,
           );
         }
@@ -2209,6 +2345,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
       const latestOp =
         latestIndex >= 0 ? latestJournal[latestIndex] : undefined;
+      if (latestOp?.kind === "delete") {
+        // Mientras se confirmaba esta escritura se solicitó un borrado:
+        // prevalece el borrado y se procesa aquí mismo.
+        await confirmEmpresaDeleteOp(userId, localId, latestOp);
+        continue;
+      }
       const latestPayload = latestOp?.payload ?? op.payload;
 
       if (
@@ -2252,7 +2394,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             entry.localId === localId &&
             entry.targetId === op.targetId,
         );
-        if (convertIndex >= 0) {
+        if (
+          convertIndex >= 0 &&
+          convertJournal[convertIndex].kind !== "delete"
+        ) {
           convertJournal[convertIndex] = {
             ...convertJournal[convertIndex],
             kind: "update",
@@ -2266,11 +2411,30 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           }
         }
       } else {
-        const removed = removeEmpresaPendingOp(userId, localId, op.revision);
+        // Se retira únicamente la entrada que coincide con la revisión
+        // confirmada y que sigue siendo una escritura: si el diario cambió a
+        // un borrado (misma o mayor revisión), se conserva y se procesa al
+        // final de esta iteración.
+        const currentEntry = findEmpresaPendingOp(userId, localId);
+        let removed = false;
+        if (
+          currentEntry &&
+          currentEntry.revision === op.revision &&
+          currentEntry.kind !== "delete"
+        ) {
+          removed = removeEmpresaPendingOp(
+            userId,
+            localId,
+            op.revision,
+            currentEntry.kind,
+          );
+        }
 
+        const remainingOp = findEmpresaPendingOp(userId, localId);
         if (
           !removed &&
-          findEmpresaPendingOp(userId, localId)?.revision === op.revision
+          remainingOp?.revision === op.revision &&
+          remainingOp.kind !== "delete"
         ) {
           throw new Error(
             `La escritura de "${op.payload.nombre}" se confirmó, pero no se pudo retirar su pendiente del almacenamiento local.`,
@@ -2293,6 +2457,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         }
         companiesRef.current = next;
         setCompanies(next);
+      }
+
+      // Si durante esta iteración se sustituyó la operación por un borrado
+      // (p. ej. edición en vuelo seguida de borrado), se procesa aquí mismo
+      // sin esperar a una recarga.
+      const pendingAfterSync = findEmpresaPendingOp(userId, localId);
+      if (pendingAfterSync?.kind === "delete") {
+        await confirmEmpresaDeleteOp(userId, localId, pendingAfterSync);
       }
     }
     if (await empresaSessionMatches(userId)) {
@@ -2336,6 +2508,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       companiesRef.current,
       remoteRows,
       readEmpresaJournal(userId),
+      userId,
     );
     if (!applyEmpresaIdRemaps(merged.remaps, userId)) {
       // Las evidencias del remapeo no pudieron guardarse: no se aplica la
@@ -2407,7 +2580,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         local.items = companiesRef.current;
       }
 
-      const pendingOps = sessionUserId ? readEmpresaJournal(sessionUserId) : [];
+      const pendingOps = sessionUserId
+        ? readEmpresaJournal(sessionUserId).filter(
+            (op) => op.userId === sessionUserId,
+          )
+        : [];
 
       const recoveredById = new Map<string, EmpresaHabitual>(
         local.items.map((company) => [company.id, company]),
@@ -2424,6 +2601,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       }
 
       for (const op of latestPendingById.values()) {
+        if (op.kind === "delete") {
+          // Un borrado pendiente no puede resucitar la fila: se elimina de
+          // la recuperación en lugar de reconstruirla desde un payload.
+          recoveredById.delete(op.localId);
+          if (op.targetId !== op.localId) recoveredById.delete(op.targetId);
+          continue;
+        }
+
         const existing = recoveredById.get(op.localId);
 
         recoveredById.set(op.localId, {
@@ -3356,7 +3541,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     // El diario de pendientes se guarda antes de publicar la lista local:
     // si su escritura falla, no se aplica la nueva lista y la edición no
     // queda registrada como irrecuperable.
-    if (userId && changedCompanies.length > 0) {
+    const removedCompanies = previous.filter(
+      (company) => !nextItems.some((item) => item.id === company.id),
+    );
+    if (
+      userId &&
+      (changedCompanies.length > 0 || removedCompanies.length > 0)
+    ) {
       const journal = readEmpresaJournal(userId);
       const timestamp = new Date().toISOString();
       for (const company of changedCompanies) {
@@ -3364,17 +3555,19 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           (op) => op.userId === userId && op.localId === company.id,
         );
         const currentOp = index >= 0 ? journal[index] : undefined;
-        const targetId = currentOp?.targetId ?? company.id;
+        const currentWriteOp =
+          currentOp && currentOp.kind !== "delete" ? currentOp : undefined;
+        const targetId = currentWriteOp?.targetId ?? company.id;
         if (!isUuid(targetId)) {
           setCompanyUpdateError(
             `No se pudo crear una operación válida para "${company.nombre}".`,
           );
           return false;
         }
-        const operation: EmpresaPendingOp = {
+        const operation: EmpresaPendingWriteOp = {
           userId,
           kind:
-            currentOp?.kind ??
+            currentWriteOp?.kind ??
             (remoteEmpresaIdsRef.current.has(targetId) ? "update" : "insert"),
           localId: company.id,
           targetId,
@@ -3383,11 +3576,35 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           createdAt: currentOp?.createdAt ?? timestamp,
           updatedAt: timestamp,
         };
-        if (currentOp?.insertedPayload !== undefined) {
+        if (currentWriteOp?.insertedPayload !== undefined) {
           // La evidencia del INSERT enviado se conserva hasta que la
           // transición a update o la confirmación final queden guardadas.
-          operation.insertedPayload = currentOp.insertedPayload;
+          operation.insertedPayload = currentWriteOp.insertedPayload;
         }
+        if (index >= 0) journal[index] = operation;
+        else journal.push(operation);
+      }
+      for (const company of removedCompanies) {
+        const index = journal.findIndex(
+          (op) => op.userId === userId && op.localId === company.id,
+        );
+        const currentOp = index >= 0 ? journal[index] : undefined;
+        const targetId = currentOp?.targetId ?? company.id;
+        if (!isUuid(targetId)) {
+          // Nunca tuvo contraparte remota: no hay nada que borrar allí y se
+          // retira cualquier pendiente local asociado para que no resucite.
+          if (index >= 0) journal.splice(index, 1);
+          continue;
+        }
+        const operation: EmpresaPendingDeleteOp = {
+          userId,
+          kind: "delete",
+          localId: company.id,
+          targetId,
+          revision: (currentOp?.revision ?? 0) + 1,
+          createdAt: currentOp?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        };
         if (index >= 0) journal[index] = operation;
         else journal.push(operation);
       }
@@ -3412,7 +3629,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setCompanies(nextItems);
     setCompanyUpdateError("");
     if (!userId) {
-      if (changedCompanies.length > 0) {
+      if (changedCompanies.length > 0 || removedCompanies.length > 0) {
         setHasPendingCompanyMigration(true);
         setCompanySyncNotice(
           "Los cambios locales de empresas todavía no están asociados a una cuenta.",
@@ -3420,7 +3637,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       }
       return true;
     }
-    if (!changedCompanies.length) return true;
+    if (!changedCompanies.length && removedCompanies.length === 0) return true;
 
     try {
       if (!(await empresaSessionMatches(userId))) {

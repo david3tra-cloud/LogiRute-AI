@@ -254,14 +254,25 @@ export async function updateUserEmpresaHabitual(
 
 export async function deleteUserEmpresaHabitual(
   id: string,
+  expectedUserId?: string,
 ): Promise<{ deleted: boolean }> {
+  if (!isUuid(id)) {
+    throw new Error(
+      "El identificador de la empresa habitual no es un UUID válido.",
+    );
+  }
   const userId = await requireCurrentUserId();
+  if (expectedUserId && userId !== expectedUserId) {
+    throw new Error(
+      "La sesión cambió; no se puede eliminar una empresa de otra cuenta.",
+    );
+  }
 
   const { data, error } = await supabase
     .from("empresas_habituales")
     .delete()
     .eq("id", id)
-    .eq("user_id", userId)
+    .eq("user_id", expectedUserId ?? userId)
     .select("id")
     .maybeSingle();
 
