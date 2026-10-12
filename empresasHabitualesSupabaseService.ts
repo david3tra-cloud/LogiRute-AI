@@ -59,25 +59,62 @@ const requireCurrentUserId = async (): Promise<string> => {
   return userId;
 };
 
+/**
+ * Tamaño de página solicitado al servidor. Elegido por debajo de los límites
+ * habituales de PostgREST (`db-max-rows`): si el servidor aplicara un tope
+ * MENOR que este valor, una página venenosa corta podría confundirse con el
+ * fin de los datos; por eso la condición de fin es `filaRecibida < pedida`
+ * y cualquier error aborta la lectura entera (nunca se devuelve un
+ * resultado parcial). No existe instantánea transaccional: se pagina por
+ * `id`, que es único e inmutable, de modo que ediciones concurrentes no
+ * alteran el orden de las filas ya emitidas; altas/bajas concurrentes
+ * durante el escaneo pueden sumarse o no a la lectura (se conservan hasta
+ * la siguiente), nunca provocan el borrado de una fila con evidencia por
+ * sí solas.
+ */
+const EMPRESA_PAGE_SIZE = 500;
+
 export async function listUserEmpresasHabituales(): Promise<
   EmpresaHabitualRow[]
 > {
   const userId = await requireCurrentUserId();
+  const rows: EmpresaHabitualRow[] = [];
+  const seenIds = new Set<string>();
+  let from = 0;
 
-  const { data, error } = await supabase
-    .from("empresas_habituales")
-    .select(EMPRESA_COLUMNS)
-    .eq("user_id", userId)
-    .order("nombre", { ascending: true });
+  for (;;) {
+    const to = from + EMPRESA_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from("empresas_habituales")
+      .select(EMPRESA_COLUMNS)
+      .eq("user_id", userId)
+      .order("id", { ascending: true })
+      .range(from, to);
 
-  if (error) {
-    return throwSupabaseError(
-      "No se pudieron cargar las empresas habituales",
-      error.message,
-    );
+    if (error) {
+      // Una lectura fallida o incompleta no autoriza retirar filas locales:
+      // se aborta sin devolver ninguna fila.
+      return throwSupabaseError(
+        "No se pudieron cargar las empresas habituales",
+        error.message,
+        error.code,
+      );
+    }
+
+    const page = data ?? [];
+    for (const row of page) {
+      if (seenIds.has(row.id)) continue;
+      seenIds.add(row.id);
+      rows.push(row);
+    }
+
+    // Página corta = fin de datos (con pageSize por debajo de cualquier
+    // tope del servidor, esto distingue fin real de límite de respuesta).
+    if (page.length < EMPRESA_PAGE_SIZE) break;
+    from += EMPRESA_PAGE_SIZE;
   }
 
-  return data ?? [];
+  return rows;
 }
 
 export async function getUserEmpresaHabitual(
