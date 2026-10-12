@@ -60,6 +60,56 @@ const deleteCompiled = ts.transpileModule(deleteFn + '\nglobalThis.subject = del
   compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None}
 }).outputText;
 
+// listUserEmpresasHabituales: lectura paginada completa.
+let listFn = null;
+let pageSizeDecl = null;
+for (const node of source.statements) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'listUserEmpresasHabituales') {
+    listFn = node.getText(source).replace(/^export\s+/, '');
+  }
+  if (ts.isVariableStatement(node)) {
+    for (const decl of node.declarationList.declarations) {
+      if (ts.isIdentifier(decl.name) && decl.name.text === 'EMPRESA_PAGE_SIZE') {
+        pageSizeDecl = `const ${decl.getText(source)};`;
+      }
+    }
+  }
+}
+assert(listFn, 'No se encontro listUserEmpresasHabituales');
+assert(pageSizeDecl, 'No se encontro EMPRESA_PAGE_SIZE');
+const listCompiled = ts.transpileModule(
+  pageSizeDecl + '\n' + listFn + '\nglobalThis.listSubject = listUserEmpresasHabituales;',
+  { compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None} }
+).outputText;
+
+function runListHarness(dbRows, failOnPage = 0) {
+  const requests = [];
+  const orderCalls = [];
+  const context = {
+    requireCurrentUserId: async () => userId,
+    EMPRESA_COLUMNS: 'id',
+    throwSupabaseError: (_operation, message) => { throw new Error(message); },
+    supabase: { from: table => {
+      assert.equal(table, 'empresas_habituales');
+      return {
+        select(){ return this; },
+        eq(){ return this; },
+        order(column, options){ orderCalls.push([column, options]); return this; },
+        range(from, to){
+          requests.push([from, to]);
+          if (requests.length === failOnPage) {
+            return Promise.resolve({ data: null, error: { message: 'fallo simulado', code: 'XX000' } });
+          }
+          return Promise.resolve({ data: dbRows.slice(from, to + 1), error: null });
+        },
+      };
+    } },
+  };
+  vm.createContext(context);
+  vm.runInContext(listCompiled, context, { timeout: 5000 });
+  return { context, requests, orderCalls };
+}
+
 function deleteContext({ data = null } = {}) {
   const filters = [];
   const query = {
@@ -115,5 +165,43 @@ function deleteContext({ data = null } = {}) {
     console.log('PASS: deleteUserEmpresaHabitual rechaza un propietario esperado distinto');
     passed++;
   }
-  console.log(`\nResultado: ${passed}/7 pruebas correctas. Sin red ni Supabase real.`);
+  // 5) Lectura paginada completa (502 filas = 1 página llena + final corta).
+  {
+    const dbRows = Array.from({ length: 502 }, (_, i) => ({
+      id: `${String(i).padStart(4, '0')}000000-0000-4000-8000-000000000000`,
+    }));
+    const { context, requests, orderCalls } = runListHarness(dbRows);
+    const result = await context.listSubject();
+    assert.equal(result.length, 502, 'lee todas las filas');
+    assert.equal(requests.length, 2, 'dos páginas');
+    assert.deepEqual(requests[0], [0, 499]);
+    assert.deepEqual(requests[1], [500, 999]);
+    assert.equal(orderCalls[0][0], 'id', 'orden estable por id');
+    assert.equal(orderCalls[0][1].ascending, true);
+    console.log('PASS: la lectura remota pagina por id hasta la página final corta');
+    passed++;
+  }
+  // 6) Múltiplo exacto del tamaño de página: la página final vacía marca el fin.
+  {
+    const dbRows = Array.from({ length: 500 }, (_, i) => ({
+      id: `${String(i).padStart(4, '0')}000000-0000-4000-8000-000000000000`,
+    }));
+    const { context, requests } = runListHarness(dbRows);
+    const result = await context.listSubject();
+    assert.equal(result.length, 500);
+    assert.equal(requests.length, 2, 'no confunde el múltiplo exacto con un fallo');
+    console.log('PASS: un tamaño exacto de página no se interpreta como lectura incompleta');
+    passed++;
+  }
+  // 7) Fallo en la segunda página: aborta sin devolver un resultado parcial.
+  {
+    const dbRows = Array.from({ length: 502 }, (_, i) => ({
+      id: `${String(i).padStart(4, '0')}000000-0000-4000-8000-000000000000`,
+    }));
+    const { context } = runListHarness(dbRows, 2);
+    await assert.rejects(() => context.listSubject());
+    console.log('PASS: una página fallida aborta la lectura entera (sin parcial)');
+    passed++;
+  }
+  console.log(`\nResultado: ${passed}/10 pruebas correctas. Sin red ni Supabase real.`);
 })().catch(error=>{console.error('FAIL:',error.stack);process.exitCode=1;});

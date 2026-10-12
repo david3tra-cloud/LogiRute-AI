@@ -643,11 +643,88 @@ export const saveEmpresaIdMap = (
   }
 };
 
+// ---------------------------------------------------------------------------
+// Evidencia duradera de sincronización (ids confirmados en el servidor).
+// Solo se elimina de la lista una fila que esté en ESTA evidencia; una copia
+// sin evidencia nunca se borra por ausencia remota.
+// ---------------------------------------------------------------------------
+
+export const EMPRESAS_SYNCED_IDS_STORAGE_KEY =
+  "logiroute_empresas_synced_ids_v1";
+
+export type EmpresaSyncedIdsLoad = {
+  ids: string[];
+  invalid: boolean;
+};
+
+export const loadEmpresaSyncedIds = (userId?: string): EmpresaSyncedIdsLoad => {
+  try {
+    const saved = localStorage.getItem(
+      userStorageKey(EMPRESAS_SYNCED_IDS_STORAGE_KEY, userId),
+    );
+    if (saved === null) return { ids: [], invalid: false };
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return { ids: [], invalid: true };
+    const ids = [...new Set(parsed.filter(isUuid))];
+    return { ids, invalid: ids.length !== parsed.length };
+  } catch {
+    return { ids: [], invalid: true };
+  }
+};
+
+export const saveEmpresaSyncedIds = (
+  ids: readonly string[],
+  userId?: string,
+): boolean => {
+  const unique = [...new Set(ids)];
+  if (!unique.every(isUuid)) return false;
+  try {
+    localStorage.setItem(
+      userStorageKey(EMPRESAS_SYNCED_IDS_STORAGE_KEY, userId),
+      JSON.stringify(unique),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Calcula el siguiente estado de evidencia tras una lectura remota completa:
+ * - se parte SIEMPRE del snapshot anterior a la lectura (nunca de los ids
+ *   recién recibidos) para detectar ausencias;
+ * - los ids observados se incorporan;
+ * - los ids excluidos como borrados (`stale`) se retiran;
+ * - se descartan ids sin fila local ni presencia remota (limpieza idempotente).
+ */
+export const nextEmpresaSyncedIds = (
+  previousSnapshot: Iterable<string>,
+  observedRemoteIds: Iterable<string>,
+  localRowsAfter: readonly EmpresaHabitual[],
+  staleConfirmedIds: readonly string[],
+): string[] => {
+  const observed = new Set(observedRemoteIds);
+  const stale = new Set(staleConfirmedIds);
+  const localIds = new Set(localRowsAfter.map((row) => row.id));
+  const next = new Set<string>();
+  for (const id of previousSnapshot) next.add(id);
+  for (const id of observed) next.add(id);
+  for (const id of stale) next.delete(id);
+  for (const id of [...next]) {
+    if (!observed.has(id) && !localIds.has(id)) next.delete(id);
+  }
+  return [...next];
+};
+
 export type EmpresaMergeResult = {
   rows: EmpresaHabitual[];
   remaps: { from: string; to: string }[];
   ambiguous: boolean;
   localOnlyCount: number;
+  /** Filas locales con evidencia de sincronización ausentes en el servidor. */
+  staleConfirmedIds: string[];
+  /** Filas locales sin evidencia ni pareja remota: conservar y revisar. */
+  unsyncedLocalRows: EmpresaHabitual[];
 };
 
 /**
@@ -656,16 +733,22 @@ export type EmpresaMergeResult = {
  * - filas con operaciones pendientes: se conserva la versión local;
  * - filas con borrado pendiente: se excluyen local y remotamente;
  * - filas sincronizadas sin pendientes: gana la versión remota;
- * - filas locales sin equivalente remoto: se conservan (respaldo);
+ * - filas locales sin equivalente remoto:
+ *     · con evidencia en `syncedIds` → se excluyen (`staleConfirmedIds`);
+ *     · sin evidencia → se conservan y se devuelven en `unsyncedLocalRows`
+ *       (nunca se eliminan por ausencia remota ni por nombre/CP);
  * - coincidencias por recipientDuplicateKey con id distinto: si el contenido
  *   coincide se adopta el id remoto; si difiere o hay varias coincidencias,
  *   se conserva lo local y se marca ambigüedad.
+ *
+ * `syncedIds` es el snapshot durable LEÍDO ANTES de la consulta remota.
  */
 export const mergeEmpresaState = (
   localRows: EmpresaHabitual[],
   remoteRows: EmpresaHabitual[],
   pendingOps: EmpresaPendingOp[],
   userId: string,
+  syncedIds: ReadonlySet<string>,
 ): EmpresaMergeResult => {
   const scopedOps = pendingOps.filter((op) => op.userId === userId);
   const pendingIds = new Set<string>();
@@ -691,6 +774,8 @@ export const mergeEmpresaState = (
   const remaps: { from: string; to: string }[] = [];
   const consumedRemoteIds = new Set<string>();
   const excludedRemoteIds = new Set<string>();
+  const staleConfirmedIds: string[] = [];
+  const unsyncedLocalRows: EmpresaHabitual[] = [];
   let ambiguous = false;
   let localOnlyCount = 0;
 
@@ -724,8 +809,17 @@ export const mergeEmpresaState = (
       matches.forEach((match) => excludedRemoteIds.add(match.id));
       ambiguous = true;
     } else {
-      rows.push(local);
       localOnlyCount += 1;
+      if (syncedIds.has(local.id)) {
+        // Evidencia durable: esta fila sí estuvo confirmada en el servidor y
+        // una lectura remota completa ya no la devuelve → borrada allí.
+        staleConfirmedIds.push(local.id);
+        continue;
+      }
+      // Sin evidencia de sincronización: se conserva y se expone para revisión
+      // explícita; jamás se elimina por ausencia remota ni por nombre/CP.
+      rows.push(local);
+      unsyncedLocalRows.push(local);
     }
   }
 
@@ -737,5 +831,12 @@ export const mergeEmpresaState = (
     rows.push(remote);
   }
 
-  return { rows, remaps, ambiguous, localOnlyCount };
+  return {
+    rows,
+    remaps,
+    ambiguous,
+    localOnlyCount,
+    staleConfirmedIds,
+    unsyncedLocalRows,
+  };
 };

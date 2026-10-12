@@ -46,12 +46,15 @@ import {
   loadEmpresaIdMap,
   loadEmpresaPendingOpsForUser,
   loadEmpresas,
+  loadEmpresaSyncedIds,
   mergeEmpresaState,
+  nextEmpresaSyncedIds,
   normalizeRecipientText,
   recipientDuplicateKey,
   saveEmpresas,
   saveEmpresaIdMap,
   saveEmpresaPendingOpsForUser,
+  saveEmpresaSyncedIds,
   type EmpresaPendingDeleteOp,
   type EmpresaPendingOp,
   type EmpresaPendingWriteOp,
@@ -1413,6 +1416,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const [companyUpdateError, setCompanyUpdateError] = useState("");
   const [companyLoadError, setCompanyLoadError] = useState("");
   const [companySyncNotice, setCompanySyncNotice] = useState("");
+  const [companyUnsyncedRows, setCompanyUnsyncedRows] = useState<
+    EmpresaHabitual[]
+  >([]);
   const [companyManagerAction, setCompanyManagerAction] = useState<
     "create" | "import" | undefined
   >(undefined);
@@ -1561,6 +1567,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const companyUserIdRef = useRef<string | null>(null);
   const remoteEmpresaIdsRef = useRef(new Set<string>());
   const empresaMergeAmbiguityRef = useRef(false);
+  const companyUnsyncedRowsRef = useRef<EmpresaHabitual[]>([]);
   const transportistasRef = useRef(initialTransportistaLoad.items);
   const pendingTransportistaDeletesRef = useRef(
     loadPendingTransportistaDeletes(),
@@ -1924,6 +1931,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         "Hay empresas locales con cambios que no coinciden de forma unívoca con las remotas; se conserva el respaldo local. Revísalas manualmente.",
       );
     }
+    if (companyUnsyncedRowsRef.current.length > 0) {
+      messages.push(
+        `Hay ${companyUnsyncedRowsRef.current.length} empresas locales sin confirmación remota. No se han eliminado: revísalas por identidad en la lista de revisión.`,
+      );
+    }
     return messages.join(" ");
   };
 
@@ -2140,6 +2152,19 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     // empresa (el guardia de versión vive en la carga automática).
     empresaMutationVersionRef.current += 1;
     remoteEmpresaIdsRef.current.delete(op.targetId);
+    // Evidencia duradera: esta id ya no está confirmada en el servidor.
+    const syncedLoadForDelete = loadEmpresaSyncedIds(userId);
+    if (syncedLoadForDelete.invalid) setCompanyStorageWarning(true);
+    if (
+      !saveEmpresaSyncedIds(
+        syncedLoadForDelete.ids.filter((syncedId) => syncedId !== op.targetId),
+        userId,
+      )
+    ) {
+      // La fila ya está borrada en el servidor; una evidencia residual se
+      // limpia de forma idempotente en la siguiente reconciliación.
+      setCompanyStorageWarning(true);
+    }
 
     const removed = removeEmpresaPendingOp(
       userId,
@@ -2383,6 +2408,19 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       }
       empresaMutationVersionRef.current += 1;
       remoteEmpresaIdsRef.current.add(confirmed.id);
+      // Evidencia duradera de que esta fila está confirmada en el servidor.
+      const syncedLoadForConfirm = loadEmpresaSyncedIds(userId);
+      if (syncedLoadForConfirm.invalid) setCompanyStorageWarning(true);
+      if (
+        !saveEmpresaSyncedIds(
+          [...syncedLoadForConfirm.ids, confirmed.id],
+          userId,
+        )
+      ) {
+        // Auto-sanable: la próxima lectura remota observa esta id y la
+        // incorpora de nuevo a la evidencia.
+        setCompanyStorageWarning(true);
+      }
 
       if (op.kind === "insert" && latestOp && latestOp.revision > op.revision) {
         // Releer el diario justo antes de escribir para no pisar una
@@ -2499,16 +2537,23 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     return task;
   };
 
-  const applyRemoteEmpresaRows = (
+  const applyRemoteEmpresaRows = async (
     remoteRows: EmpresaHabitual[],
     userId: string,
-  ) => {
+    previousSyncedIds: ReadonlySet<string>,
+  ): Promise<void> => {
     if (companyUserIdRef.current !== userId) return;
+    // `previousSyncedIds` es el snapshot durable leído ANTES de la consulta
+    // remota: con él (nunca con los ids recién recibidos) se detectan
+    // ausencias. La lectura paginada NO es una instantánea transaccional:
+    // por eso cada candidato a exclusión se confirma además de forma
+    // individual por id + usuario esperado antes de retirarlo.
     const merged = mergeEmpresaState(
       companiesRef.current,
       remoteRows,
       readEmpresaJournal(userId),
       userId,
+      previousSyncedIds,
     );
     if (!applyEmpresaIdRemaps(merged.remaps, userId)) {
       // Las evidencias del remapeo no pudieron guardarse: no se aplica la
@@ -2518,19 +2563,247 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
       return;
     }
-    if (!persistEmpresaRows(merged.rows, userId)) {
+
+    // Confirmación individual SOLO de los candidatos a exclusión (nunca de
+    // todas las empresas). Si la comprobación falla o la sesión/versión
+    // cambian, no se retira la fila ni se publica un resultado antiguo.
+    const mutationVersionBeforeChecks = empresaMutationVersionRef.current;
+    const stillCurrent = async (): Promise<boolean> => {
+      const refsMatch = (): boolean =>
+        mountedRef.current &&
+        companyUserIdRef.current === userId &&
+        empresaMutationVersionRef.current === mutationVersionBeforeChecks;
+      if (!refsMatch()) return false;
+      const sessionMatches = await empresaSessionMatches(userId);
+      return sessionMatches && refsMatch();
+    };
+
+    const confirmedStaleIds: string[] = [];
+    const restoredRows: EmpresaHabitual[] = [];
+
+    for (const staleId of merged.staleConfirmedIds) {
+      if (!(await stillCurrent())) return;
+      if (!isUuid(staleId)) {
+        const localOnly = companiesRef.current.find(
+          (item) => item.id === staleId,
+        );
+        if (localOnly) restoredRows.push(localOnly);
+        continue;
+      }
+      let remoteRow = null;
+      let checkFailed = false;
+      try {
+        remoteRow = await getEmpresaRowByIdForUser(staleId, userId);
+      } catch {
+        // Comprobación fallida: se conserva la copia local y su evidencia.
+        checkFailed = true;
+      }
+      if (!(await stillCurrent())) return;
+      const localRow = companiesRef.current.find(
+        (item) => item.id === staleId,
+      );
+      if (checkFailed) {
+        if (localRow) restoredRows.push(localRow);
+        continue;
+      }
+      if (remoteRow) {
+        // La fila sigue existiendo: se conserva y se incorpora su versión
+        // vigente en lugar de retirarla por una omisión de la lista.
+        restoredRows.push(
+          localRow
+            ? { ...localRow, ...mapSupabaseEmpresaHabitualToLocal(remoteRow) }
+            : mapSupabaseEmpresaHabitualToLocal(remoteRow),
+        );
+        continue;
+      }
+      confirmedStaleIds.push(staleId);
+    }
+
+    if (!(await stillCurrent())) return;
+
+    const reconciledRows = [...merged.rows, ...restoredRows];
+    // Orden estricto: lista reconciliada → evidencia → publicación.
+    if (!persistEmpresaRows(reconciledRows, userId)) {
       setCompanyLoadError("No se pudo guardar la lista fusionada. La lista remota no se publicó.");
       return;
     }
+    const observedIds = remoteRows.map((item) => item.id);
+    const nextSynced = nextEmpresaSyncedIds(
+      previousSyncedIds,
+      observedIds,
+      reconciledRows,
+      confirmedStaleIds,
+    );
+    if (!saveEmpresaSyncedIds(nextSynced, userId)) {
+      // La lista ya quedó guardada sin las filas obsoletas; la evidencia no.
+      // No se publica ni se anuncia completada: el próximo intento recalcula
+      // desde la evidencia anterior (idempotente, sin reintroducir filas).
+      setCompanyStorageWarning(true);
+      setCompanyLoadError(
+        "La lista reconciliada se guardó, pero no se pudo persistir la evidencia de sincronización. La reconciliación no se da por completada; se reintentará en la próxima lectura sin reintroducir empresas eliminadas.",
+      );
+      return;
+    }
     empresaMergeAmbiguityRef.current = merged.ambiguous;
-    remoteEmpresaIdsRef.current = new Set(remoteRows.map((row) => row.id));
-    companiesRef.current = merged.rows;
-    setCompanies(merged.rows);
+    remoteEmpresaIdsRef.current = new Set(observedIds);
+    companiesRef.current = reconciledRows;
+    setCompanies(reconciledRows);
+    companyUnsyncedRowsRef.current = merged.unsyncedLocalRows;
+    setCompanyUnsyncedRows(merged.unsyncedLocalRows);
     setCompanyLoadError("");
     setCompanySyncNotice(composeCompanySyncNotice(userId));
     setHasPendingCompanyMigration(
       readEmpresaJournal(userId).length > 0 || loadEmpresas().items.length > 0,
     );
+  };
+
+  /**
+   * Elimina EXCLUSIVAMENTE la copia local de una empresa sin confirmación
+   * remota, tras comprobar con la lectura completa vigente que su id no
+   * existe en el servidor y que no tiene operaciones pendientes. No crea
+   * operaciones en el diario ni envía ningún DELETE remoto. Si la sesión,
+   * la versión de mutación o las condiciones cambian, se vuelve a comprobar
+   * y se cancela.
+   */
+  const removeLocalUnsyncedCopy = async (
+    row: EmpresaHabitual,
+  ): Promise<void> => {
+    const userId = companyUserIdRef.current;
+    if (!userId) {
+      setCompanyUpdateError(
+        "Inicia sesión para revisar las copias locales de empresas.",
+      );
+      return;
+    }
+    const versionAtStart = empresaMutationVersionRef.current;
+    setCompanyUpdateError("");
+
+    const stillValid = async (): Promise<boolean> => {
+      if (
+        !mountedRef.current ||
+        companyUserIdRef.current !== userId ||
+        empresaMutationVersionRef.current !== versionAtStart
+      ) {
+        return false;
+      }
+      const sessionMatches = await empresaSessionMatches(userId);
+      return (
+        sessionMatches &&
+        mountedRef.current &&
+        companyUserIdRef.current === userId &&
+        empresaMutationVersionRef.current === versionAtStart
+      );
+    };
+
+    let remoteIds: Set<string>;
+    try {
+      const remoteRows = await listUserEmpresasHabituales();
+      remoteIds = new Set(remoteRows.map((remote) => remote.id));
+    } catch (error) {
+      setCompanyUpdateError(
+        `No se pudo verificar la copia local contra el servidor; no se eliminó nada. ${empresaErrorMessage(error)}`,
+      );
+      return;
+    }
+
+    // Confirmación individual decisiva: una omisión de la lista paginada no
+    // habilita esta acción; la ausencia se verifica por id + usuario.
+    let individualRow = null;
+    let individualCheckError: unknown = null;
+    try {
+      individualRow = await getEmpresaRowByIdForUser(row.id, userId);
+    } catch (error) {
+      individualCheckError = error;
+    }
+
+    if (!(await stillValid())) {
+      setCompanyUpdateError(
+        "El estado cambió durante la comprobación; no se eliminó ninguna copia local. Vuelve a intentarlo.",
+      );
+      return;
+    }
+    if (individualCheckError !== null) {
+      setCompanyUpdateError(
+        `No se pudo confirmar individualmente la empresa con id ${row.id}; no se eliminó nada. ${empresaErrorMessage(individualCheckError)}`,
+      );
+      return;
+    }
+    if (individualRow) {
+      setCompanyUpdateError(
+        `La empresa con id ${row.id} existe en el servidor según la comprobación individual: no es una copia local y no se ha eliminado nada.`,
+      );
+      return;
+    }
+    if (remoteIds.has(row.id)) {
+      setCompanyUpdateError(
+        `La empresa con id ${row.id} existe en el servidor según la lectura vigente: no es una copia local y no se ha eliminado nada.`,
+      );
+      return;
+    }
+    if (
+      readEmpresaJournal(userId).some(
+        (op) => op.localId === row.id || op.targetId === row.id,
+      )
+    ) {
+      setCompanyUpdateError(
+        `La empresa con id ${row.id} tiene operaciones pendientes; no se ha eliminado nada.`,
+      );
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `¿Eliminar la copia local de "${row.nombre}" (id ${row.id})? Es una copia local sin confirmación remota; no se enviará ninguna eliminación al servidor.`,
+      )
+    ) {
+      return;
+    }
+
+    if (!(await stillValid())) {
+      setCompanyUpdateError(
+        "El estado cambió tras confirmar; no se eliminó ninguna copia local.",
+      );
+      return;
+    }
+
+    const next = companiesRef.current.filter(
+      (company) => company.id !== row.id,
+    );
+    if (next.length === companiesRef.current.length) {
+      const remaining = companyUnsyncedRowsRef.current.filter(
+        (item) => item.id !== row.id,
+      );
+      companyUnsyncedRowsRef.current = remaining;
+      setCompanyUnsyncedRows(remaining);
+      setCompanySyncNotice(composeCompanySyncNotice(userId));
+      return;
+    }
+    if (!persistEmpresaRows(next, userId)) {
+      setCompanyUpdateError(
+        "No se pudo guardar la lista local; la copia se conserva sin cambios.",
+      );
+      return;
+    }
+    const syncedLoad = loadEmpresaSyncedIds(userId);
+    if (syncedLoad.invalid) setCompanyStorageWarning(true);
+    if (
+      syncedLoad.ids.includes(row.id) &&
+      !saveEmpresaSyncedIds(
+        syncedLoad.ids.filter((syncedId) => syncedId !== row.id),
+        userId,
+      )
+    ) {
+      setCompanyStorageWarning(true);
+    }
+    empresaMutationVersionRef.current += 1;
+    companiesRef.current = next;
+    setCompanies(next);
+    const remaining = companyUnsyncedRowsRef.current.filter(
+      (item) => item.id !== row.id,
+    );
+    companyUnsyncedRowsRef.current = remaining;
+    setCompanyUnsyncedRows(remaining);
+    setCompanySyncNotice(composeCompanySyncNotice(userId));
   };
 
   useEffect(() => {
@@ -2545,6 +2818,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       companyUserIdRef.current = sessionUserId;
       remoteEmpresaIdsRef.current = new Set();
       empresaMergeAmbiguityRef.current = false;
+      // La revisión de copias sin confirmación pertenece a la cuenta anterior.
+      companyUnsyncedRowsRef.current = [];
+      setCompanyUnsyncedRows([]);
       // El estado de migración pertenece a la cuenta anterior: se limpia
       // al cambiar de sesión para no publicar el estado de una sesión vieja.
       companyMigrationInProgressRef.current = false;
@@ -2662,6 +2938,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
           const mutationVersionAtRequest = empresaMutationVersionRef.current;
 
+          // Evidencia durable leída ANTES de la consulta remota: con ella se
+          // detectarán ausencias en la reconciliación.
+          const syncedSnapshotLoad = loadEmpresaSyncedIds(sessionUserId);
+          if (syncedSnapshotLoad.invalid) setCompanyStorageWarning(true);
+          const syncedSnapshot = new Set(syncedSnapshotLoad.ids);
+
           const rows = await listUserEmpresasHabituales();
           const sessionStillMatches =
             await empresaSessionMatches(sessionUserId);
@@ -2682,9 +2964,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             return;
           }
 
-          applyRemoteEmpresaRows(
+          await applyRemoteEmpresaRows(
             rows.map(mapSupabaseEmpresaHabitualToLocal),
             sessionUserId,
+            syncedSnapshot,
           );
         } catch (error) {
           if (!active || version !== loadVersion) return;
@@ -5035,6 +5318,39 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           >
             {companySyncNotice}
           </p>
+        )}
+        {companyUnsyncedRows.length > 0 && (
+          <div className="mb-4 rounded-lg border border-orange-300 bg-orange-50 p-3 text-sm text-orange-900">
+            <p className="font-bold">
+              {companyUnsyncedRows.length === 1
+                ? "1 empresa local sin confirmación remota."
+                : `${companyUnsyncedRows.length} empresas locales sin confirmación remota.`}{" "}
+              No se han eliminado: revísalas por identidad (id, nombre,
+              dirección), nunca por nombre o código postal.
+            </p>
+            <ul className="mt-2 space-y-2">
+              {companyUnsyncedRows.map((row) => (
+                <li
+                  key={row.id}
+                  className="flex flex-col gap-2 rounded-lg bg-white p-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="break-all">
+                    <span className="font-bold">{row.nombre}</span> —{" "}
+                    {row.direccion}, {row.ciudad}
+                    {row.codigoPostal ? ` (CP ${row.codigoPostal})` : ""} — id{" "}
+                    {row.id}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void removeLocalUnsyncedCopy(row)}
+                    className="shrink-0 self-start rounded-lg border border-red-300 px-3 py-1 font-bold text-red-700 transition hover:bg-red-50 sm:self-auto"
+                  >
+                    Eliminar copia local
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         {companyMigrationNotice && (
           <p
