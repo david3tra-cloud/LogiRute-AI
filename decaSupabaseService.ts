@@ -273,10 +273,13 @@ export async function getCurrentUserId(): Promise<string | null> {
 }
 
 export async function listUserDecas(): Promise<DecaRow[]> {
-  await requireCurrentUserId();
+  const userId = await requireCurrentUserId();
+  // Defensa en profundidad: el listado se limita al propietario. Esto no
+  // sustituye a las políticas RLS del servidor.
   const { data, error } = await supabase
     .from("decas")
     .select(DECA_COLUMNS)
+    .eq("user_id", userId)
     .returns<DecaRow[]>();
 
   if (error) {

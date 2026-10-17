@@ -3,7 +3,7 @@ import { EmpresaHabitual } from "./types";
 export const EMPRESAS_STORAGE_KEY = "logiroute_empresas_v1";
 export const DESTINATARIOS_STORAGE_KEY = "logiroute_destinatarios_v1";
 
-const userStorageKey = (key: string, userId?: string) =>
+export const userStorageKey = (key: string, userId?: string) =>
   userId ? `${key}:${encodeURIComponent(userId)}` : key;
 
 export type EmpresaLoadResult = {

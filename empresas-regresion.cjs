@@ -136,7 +136,7 @@ function fixture() {
     setCompanyUpdateError:message=>state.errors.push(message),
     setCompanyLoadError:message=>message?state.loadErrors.push(message):state.loadErrors.splice(0),
     setCompanyUnsyncedRows:rows=>{state.unsynced=copy(rows);},
-    setCompanyStorageWarning:noop, setHasPendingCompanyMigration:noop,
+    setCompanyStorageWarning:noop,
     setCompanySyncNotice:message=>state.notices.push(message),
     setCompanies:()=>state.published++, setDecas:noop, setForm:noop,
   };
@@ -194,6 +194,26 @@ test("updateCompanies comunica fallo de persistencia sin publicar",async()=>{
   const result=await f.subject.updateCompanies([{id,...payload("Nueva")}]);
   assert.equal(result,false);assert.equal(f.state.published,0);assert.equal(f.state.writes.length,0);
   assert.equal(f.state.ops.length,1);
+});
+test("updateCompanies rechaza mutaciones sin sesión antes de persistir",async()=>{
+  const f=fixture();
+  f.sandbox.companyUserIdRef.current=null;
+  const base={id,...payload("Base"),createdAt:"2026-01-01",updatedAt:"2026-01-01"};
+  f.sandbox.companiesRef.current=[base];
+  let persisted=0;
+  const originalPersist=f.sandbox.persistEmpresaRows;
+  f.sandbox.persistEmpresaRows=(...args)=>{persisted++;return originalPersist(...args);};
+  const edited=await f.subject.updateCompanies([{...base,nombre:"Editada"}]);
+  assert.equal(edited,false,"la edicion sin sesion se rechaza");
+  assert.equal(persisted,0,"no se persiste ninguna lista sin sesion");
+  assert.equal(f.state.ops.length,0,"no se escribe el diario sin sesion");
+  assert.equal(f.state.writes.length,0,"no se dispara ninguna sincronizacion remota");
+  assert.equal(f.state.published,0,"no se publica la lista");
+  assert.ok(f.state.errors.length>0,"se comunica el rechazo al usuario");
+  const deleted=await f.subject.updateCompanies([]);
+  assert.equal(deleted,false,"el borrado sin sesion tambien se rechaza");
+  assert.equal(persisted,0,"el rechazo tampoco persiste en el borrado");
+  assert.equal(f.state.writes.length,0,"el rechazo no sincroniza el borrado");
 });
 test("scheduleEmpresaFlush propaga el fallo y permite un reintento posterior",async()=>{
   const f=fixture();f.state.ops=[op()];f.state.failJournal=true;

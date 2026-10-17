@@ -62,6 +62,7 @@ import {
   resolveGoogleMapsUrl,
   validateMapsUrl,
 } from "./mapsUrlService";
+import { userStorageKey } from "./destinatariosService";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -274,6 +275,63 @@ const safeGetItem = (key: string) => {
   }
 };
 
+// Almacenamiento de la jornada (paradas y secuencia) con ámbito por usuario.
+// Las claves globales heredadas no se leen ni se escriben: quedan como
+// reserva intocada hasta decidir su recuperación.
+export const deliveriesStorageKey = (userId?: string) =>
+  userStorageKey(STORAGE_KEY, userId);
+
+export const sequenceStorageKey = (userId?: string) =>
+  userStorageKey(SEQUENCE_KEY, userId);
+
+export const loadDeliveriesForUser = (userId?: string): Delivery[] => {
+  if (!userId) return [];
+  try {
+    const saved = safeGetItem(deliveriesStorageKey(userId));
+    const parsed: unknown = saved ? JSON.parse(saved) : [];
+    return Array.isArray(parsed) ? (parsed as Delivery[]) : [];
+  } catch {
+    return [];
+  }
+};
+
+export const loadSequenceForUser = (userId?: string): string[] => {
+  if (!userId) return [];
+  try {
+    const saved = safeGetItem(sequenceStorageKey(userId));
+    const parsed: unknown = saved ? JSON.parse(saved) : [];
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+};
+
+export const persistUserScopedJornada = (
+  userId: string,
+  userDeliveries: Delivery[],
+  userSequence: string[],
+): boolean => {
+  try {
+    localStorage.setItem(
+      deliveriesStorageKey(userId),
+      JSON.stringify(userDeliveries),
+    );
+    localStorage.setItem(sequenceStorageKey(userId), JSON.stringify(userSequence));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Gate de persistencia: solo se escribe la jornada cuando el estado en
+// memoria pertenece ya al usuario autenticado (hidratación completada),
+// de forma que durante un cambio de sesión nunca se escriben los datos
+// de A bajo la clave de B.
+export const canPersistForCurrentSession = (
+  currentUser: { id: string } | null,
+  hydratedUserId: string | null,
+): boolean => Boolean(currentUser && hydratedUserId === currentUser.id);
+
 const hasPasswordRecoveryPending = () => {
   try {
     return (
@@ -304,18 +362,13 @@ const App: React.FC = () => {
   const [isInstallPromptDeclined, setIsInstallPromptDeclined] =
     useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
-  const [deliveries, setDeliveries] = useState<Delivery[]>(() => {
-    const saved = safeGetItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const deliveriesRef = useRef(deliveries);
   deliveriesRef.current = deliveries;
   const importingDeCAIdsRef = useRef(new Set<string>());
 
-  const [manualSequence, setManualSequence] = useState<string[]>(() => {
-    const saved = safeGetItem(SEQUENCE_KEY);
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [manualSequence, setManualSequence] = useState<string[]>([]);
+  const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
 
   const [viewMode, setViewMode] = useState<
     "split" | "map" | "list" | "control"
@@ -467,16 +520,37 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // Hidratación por usuario: al cambiar o cerrar sesión se vacía primero el
+  // estado en memoria y se recarga desde la clave del nuevo usuario. Los
+  // guards de respuestas antiguas viven en el gate de persistencia y en el
+  // key por usuario del montaje de DeCASection.
+  useEffect(() => {
+    const userId = user?.id;
+    if (!userId) {
+      setDeliveries([]);
+      setManualSequence([]);
+      setHydratedUserId(null);
+      return;
+    }
+    setDeliveries(loadDeliveriesForUser(userId));
+    setManualSequence(loadSequenceForUser(userId));
+    setHydratedUserId(userId);
+  }, [user?.id]);
+
   useEffect(() => {
     if (isAppClosed) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(deliveries));
-      localStorage.setItem(SEQUENCE_KEY, JSON.stringify(manualSequence));
+      // Los datos de paradas y secuencia solo se persisten bajo la clave del
+      // usuario autenticado y cuando el estado en memoria corresponde ya a su
+      // hidratación; así nunca se escribe el estado de A bajo la clave de B.
+      if (user && canPersistForCurrentSession(user, hydratedUserId)) {
+        persistUserScopedJornada(user.id, deliveries, manualSequence);
+      }
       localStorage.setItem(VIEW_MODE_KEY, viewMode);
     } catch {
       // ignorar errores de storage
     }
-  }, [deliveries, manualSequence, viewMode, isAppClosed]);
+  }, [deliveries, manualSequence, viewMode, isAppClosed, user, hydratedUserId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1029,7 +1103,16 @@ const App: React.FC = () => {
   };
 
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
-    if (editingLockedRef.current) return;
+    // Req. reparto: el bloqueo de edición no impide registrar el resultado
+    // operativo (Entregado/Incidencia), pero sí impide reabrir la tarea
+    // (volver a PENDING) y el resto de ediciones.
+    if (
+      editingLockedRef.current &&
+      status !== DeliveryStatus.COMPLETED &&
+      status !== DeliveryStatus.ISSUE
+    ) {
+      return;
+    }
     // igual que en GitHub: reordena activas y completadas
     setDeliveries((prev) => {
       const updated = prev.map((d) => (d.id === id ? { ...d, status } : d));
@@ -1060,21 +1143,56 @@ const App: React.FC = () => {
     if (window.confirm("¿BORRAR Y CERRAR? Se eliminarán todas las paradas.")) {
       setIsAppClosed(true);
       try {
+        // Preferencias y caché globales. Las reservas de datos heredadas
+        // (claves globales sin propietario) NO se borran: quedan pendientes
+        // de decisión.
         [
-          STORAGE_KEY,
           VIEW_MODE_KEY,
-          SEQUENCE_KEY,
-          "logiroute_empresas_v1",
-          "logiroute_destinatarios_v1",
-          "logiroute_matriculas_v1",
-          "logiroute_transportistas_v1",
-          "transport_app_decas_pending_deletes_v1",
-          "transport_app_decas_remote_ids_v1",
-          "logiroute_transportistas_pending_deletes_v1",
-          "logiroute_transportistas_pending_sync_v1",
           "logiroute_transportistas_sync_enabled_v1",
           "logiroute_address_cache_v1",
         ].forEach((key) => localStorage.removeItem(key));
+        const uid = user?.id;
+        if (uid) {
+          // Datos de la cuenta actual (almacenamiento por usuario).
+          [
+            deliveriesStorageKey(uid),
+            sequenceStorageKey(uid),
+            userStorageKey("transport_app_decas", uid),
+            userStorageKey("logiroute_matriculas_v1", uid),
+            userStorageKey("logiroute_transportistas_v1", uid),
+            userStorageKey("logiroute_transportistas_pending_deletes_v1", uid),
+            userStorageKey("logiroute_transportistas_pending_sync_v1", uid),
+          ].forEach((key) => localStorage.removeItem(key));
+          // Colas de DeCAs (clave global con etiqueta por usuario): se
+          // retiran sólo las entradas de esta cuenta; las de otras cuentas
+          // se conservan intactas.
+          [
+            "transport_app_decas_pending_deletes_v1",
+            "transport_app_decas_remote_ids_v1",
+          ].forEach((key) => {
+            try {
+              const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+              if (Array.isArray(parsed)) {
+                localStorage.setItem(
+                  key,
+                  JSON.stringify(
+                    parsed.filter(
+                      (entry) =>
+                        !(
+                          entry &&
+                          typeof entry === "object" &&
+                          "userId" in entry &&
+                          (entry as { userId?: unknown }).userId === uid
+                        ),
+                    ),
+                  ),
+                );
+              }
+            } catch {
+              // ignorar
+            }
+          });
+        }
         sessionStorage.removeItem(PASSWORD_RECOVERY_PENDING_STORAGE_KEY);
       } catch {
         // ignorar
@@ -1973,6 +2091,8 @@ const App: React.FC = () => {
         className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "decas" ? "block" : "hidden"}`}
       >
         <DeCASection
+          key={user?.id ?? "anon"}
+          sessionUserId={user?.id ?? null}
           isDeCAInRoutes={(decaId) =>
             deliveries.some((delivery) => delivery.decaId === decaId)
           }

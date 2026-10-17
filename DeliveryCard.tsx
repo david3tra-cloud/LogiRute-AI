@@ -400,23 +400,21 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                     <>
                       <button
                         type="button"
-                        disabled={editingLocked}
                         onClick={(e) => {
                           e.stopPropagation();
                           onStatusChange(delivery.id, DeliveryStatus.COMPLETED);
                         }}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-green-600 text-green-600 hover:bg-green-50 text-[10px] font-black transition-all uppercase disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-green-600 text-green-600 hover:bg-green-50 text-[10px] font-black transition-all uppercase"
                       >
                         <CheckCircle size={14} /> Entregado
                       </button>
                       <button
                         type="button"
-                        disabled={editingLocked}
                         onClick={(e) => {
                           e.stopPropagation();
                           onStatusChange(delivery.id, DeliveryStatus.ISSUE);
                         }}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-50 text-[10px] font-black transition-all uppercase disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-50 text-[10px] font-black transition-all uppercase"
                       >
                         <AlertTriangle size={14} /> Incidencia
                       </button>

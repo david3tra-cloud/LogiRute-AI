@@ -21,7 +21,7 @@ import {
 
 type Props = {
   recipients: EmpresaHabitual[];
-  onChange: (recipients: EmpresaHabitual[]) => void;
+  onChange: (recipients: EmpresaHabitual[]) => Promise<boolean>;
   onClose: () => void;
   initialAction?: "create" | "import";
 };
@@ -215,7 +215,7 @@ const DestinatariosManager: React.FC<Props> = ({
     }
   };
 
-  const handleSave = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSave = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const normalized = normalizeForm(form);
     const nextErrors: FormErrors = {};
@@ -241,30 +241,29 @@ const DestinatariosManager: React.FC<Props> = ({
     }
 
     const now = new Date().toISOString();
-    if (editing) {
-      onChange(
-        recipients.map((recipient) =>
-          recipient.id === editing.id
-            ? {
-                ...normalized,
-                id: editing.id,
-                createdAt: editing.createdAt,
-                updatedAt: now,
-              }
-            : recipient,
-        ),
-      );
-    } else {
-      onChange([
-        {
-          ...normalized,
-          id: createRecipientId(),
-          createdAt: now,
-          updatedAt: now,
-        },
-        ...recipients,
-      ]);
-    }
+    const saved = editing
+      ? await onChange(
+          recipients.map((recipient) =>
+            recipient.id === editing.id
+              ? {
+                  ...normalized,
+                  id: editing.id,
+                  createdAt: editing.createdAt,
+                  updatedAt: now,
+                }
+              : recipient,
+          ),
+        )
+      : await onChange([
+          {
+            ...normalized,
+            id: createRecipientId(),
+            createdAt: now,
+            updatedAt: now,
+          },
+          ...recipients,
+        ]);
+    if (!saved) return;
     setFormOpen(false);
   };
 
@@ -295,15 +294,17 @@ const DestinatariosManager: React.FC<Props> = ({
     }
   };
 
-  const confirmImport = () => {
+  const confirmImport = async () => {
     if (!csvPreview || csvError) return;
     const toImport = csvPreview.flatMap((row) =>
       row.empresa && !row.reason ? [row.empresa] : [],
     );
-    onChange([...toImport, ...recipients]);
+    const saved = await onChange([...toImport, ...recipients]);
     const omitted = csvDetectedRows - toImport.length;
     setImportMessage(
-      `Importadas ${toImport.length} empresas; omitidas ${omitted}.`,
+      saved
+        ? `Importadas ${toImport.length} empresas; omitidas ${omitted}.`
+        : "No se pudo guardar la importación. Revisa el aviso de error de la sección.",
     );
     setCsvPreview(null);
     setCsvDetectedRows(0);
