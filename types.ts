@@ -138,3 +138,42 @@ export interface DeCA {
   driveFileNombre?: string;
   driveSubidoEn?: string;
 }
+
+export interface JornadaRegistroResumen {
+  totalStops: number;
+  completedStops: number;
+  issueStops: number;
+  pendingStops: number;
+  deliveriesCount: number;
+  pickupsCount: number;
+}
+
+export interface JornadaRegistro {
+  id: string;
+  userId: string;
+  fingerprint: string;
+  fechaCierre: string;
+  resumen: JornadaRegistroResumen;
+  deliveries: Delivery[];
+  sequence: string[];
+}
+
+export type PendingClosureStatus = "ARCHIVING" | "CLEARING_ROUTE" | "COMPLETED";
+
+export interface PendingClosureMarker {
+  id: string;
+  userId: string;
+  fingerprint: string;
+  createdAt: string;
+  status: PendingClosureStatus;
+}
+
+export type JornadaCierreResult =
+  | { status: "SUCCESS"; jornada: JornadaRegistro }
+  | { status: "RECOVERY_COMPLETED"; jornada: JornadaRegistro }
+  | { status: "PARTIAL_SUCCESS"; jornada?: JornadaRegistro; error: string }
+  | { status: "ARCHIVE_FAILED"; error: string }
+  | { status: "CLOSURE_CONFLICT"; error: string }
+  | { status: "SESSION_MISMATCH"; error: string }
+  | { status: "EMPTY_ROUTE" }
+  | { status: "CANCELLED" };

@@ -63,6 +63,8 @@ import {
   validateMapsUrl,
 } from "./mapsUrlService";
 import { userStorageKey } from "./destinatariosService";
+import { executeCerrarJornada } from "./registroJornadasService";
+import { RegistroModal } from "./RegistroModal";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -311,15 +313,64 @@ export const persistUserScopedJornada = (
   userDeliveries: Delivery[],
   userSequence: string[],
 ): boolean => {
+  const delivKey = deliveriesStorageKey(userId);
+  const seqKey = sequenceStorageKey(userId);
+  const backupDeliveries = safeGetItem(delivKey);
+
   try {
-    localStorage.setItem(
-      deliveriesStorageKey(userId),
-      JSON.stringify(userDeliveries),
-    );
-    localStorage.setItem(sequenceStorageKey(userId), JSON.stringify(userSequence));
-    return true;
+    localStorage.setItem(delivKey, JSON.stringify(userDeliveries));
   } catch {
     return false;
+  }
+
+  try {
+    localStorage.setItem(seqKey, JSON.stringify(userSequence));
+    return true;
+  } catch {
+    try {
+      if (backupDeliveries !== null) {
+        localStorage.setItem(delivKey, backupDeliveries);
+      } else {
+        localStorage.removeItem(delivKey);
+      }
+    } catch {
+      // ignorar fallo de rollback
+    }
+    return false;
+  }
+};
+
+export const persistUserScopedJornadaWithRollback = (
+  userId: string,
+  userDeliveries: Delivery[],
+  userSequence: string[],
+): { ok: boolean; rollbackOk: boolean } => {
+  const delivKey = deliveriesStorageKey(userId);
+  const seqKey = sequenceStorageKey(userId);
+  const backupDeliveries = safeGetItem(delivKey);
+
+  try {
+    localStorage.setItem(delivKey, JSON.stringify(userDeliveries));
+  } catch {
+    return { ok: false, rollbackOk: true }; // Nada mutó
+  }
+
+  try {
+    localStorage.setItem(seqKey, JSON.stringify(userSequence));
+    return { ok: true, rollbackOk: true };
+  } catch {
+    // Falló la segunda escritura; intentar restaurar la primera
+    try {
+      if (backupDeliveries !== null) {
+        localStorage.setItem(delivKey, backupDeliveries);
+      } else {
+        localStorage.removeItem(delivKey);
+      }
+      return { ok: false, rollbackOk: true };
+    } catch {
+      // El rollback también falló (ej. almacenamiento saturado o bloqueado)
+      return { ok: false, rollbackOk: false };
+    }
   }
 };
 
@@ -408,6 +459,8 @@ const App: React.FC = () => {
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
+  const [isRegistroOpen, setIsRegistroOpen] = useState(false);
+  const isClosingJornadaRef = useRef(false);
   const [currentUserLoc, setCurrentUserLoc] = useState<
     { latitude: number; longitude: number } | undefined
   >(undefined);
@@ -526,6 +579,7 @@ const App: React.FC = () => {
   // key por usuario del montaje de DeCASection.
   useEffect(() => {
     const userId = user?.id;
+    setIsRegistroOpen(false);
     if (!userId) {
       setDeliveries([]);
       setManualSequence([]);
@@ -1139,65 +1193,52 @@ const App: React.FC = () => {
     }
   };
 
-  const handleClearAll = () => {
-    if (window.confirm("¿BORRAR Y CERRAR? Se eliminarán todas las paradas.")) {
-      setIsAppClosed(true);
-      try {
-        // Preferencias y caché globales. Las reservas de datos heredadas
-        // (claves globales sin propietario) NO se borran: quedan pendientes
-        // de decisión.
-        [
-          VIEW_MODE_KEY,
-          "logiroute_transportistas_sync_enabled_v1",
-          "logiroute_address_cache_v1",
-        ].forEach((key) => localStorage.removeItem(key));
-        const uid = user?.id;
-        if (uid) {
-          // Datos de la cuenta actual (almacenamiento por usuario).
-          [
-            deliveriesStorageKey(uid),
-            sequenceStorageKey(uid),
-            userStorageKey("transport_app_decas", uid),
-            userStorageKey("logiroute_matriculas_v1", uid),
-            userStorageKey("logiroute_transportistas_v1", uid),
-            userStorageKey("logiroute_transportistas_pending_deletes_v1", uid),
-            userStorageKey("logiroute_transportistas_pending_sync_v1", uid),
-          ].forEach((key) => localStorage.removeItem(key));
-          // Colas de DeCAs (clave global con etiqueta por usuario): se
-          // retiran sólo las entradas de esta cuenta; las de otras cuentas
-          // se conservan intactas.
-          [
-            "transport_app_decas_pending_deletes_v1",
-            "transport_app_decas_remote_ids_v1",
-          ].forEach((key) => {
-            try {
-              const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
-              if (Array.isArray(parsed)) {
-                localStorage.setItem(
-                  key,
-                  JSON.stringify(
-                    parsed.filter(
-                      (entry) =>
-                        !(
-                          entry &&
-                          typeof entry === "object" &&
-                          "userId" in entry &&
-                          (entry as { userId?: unknown }).userId === uid
-                        ),
-                    ),
-                  ),
-                );
-              }
-            } catch {
-              // ignorar
-            }
-          });
-        }
-        sessionStorage.removeItem(PASSWORD_RECOVERY_PENDING_STORAGE_KEY);
-      } catch {
-        // ignorar
+  const handleClearAll = async () => {
+    if (isClosingJornadaRef.current) return;
+    if (!user?.id || hydratedUserId !== user.id) {
+      alert(
+        "No se puede cerrar la jornada: la sesión no está lista o pertenece a otro usuario.",
+      );
+      return;
+    }
+
+    isClosingJornadaRef.current = true;
+    try {
+      const result = await executeCerrarJornada({
+        user,
+        hydratedUserId,
+        deliveries,
+        manualSequence,
+        persistRouteFn: persistUserScopedJornadaWithRollback,
+        onRouteCleared: () => {
+          setDeliveries([]);
+          setManualSequence([]);
+        },
+      });
+
+      if (result.status === "SUCCESS") {
+        alert("Jornada cerrada correctamente y archivada en el Registro.");
+      } else if (result.status === "RECOVERY_COMPLETED") {
+        alert(
+          "Se ha completado la recuperación del cierre pendiente anterior y se ha vaciado la ruta.",
+        );
+      } else if (result.status === "PARTIAL_SUCCESS") {
+        alert(result.error);
+      } else if (result.status === "CLOSURE_CONFLICT") {
+        alert(`Conflicto de cierre: ${result.error}`);
+      } else if (result.status === "ARCHIVE_FAILED") {
+        alert(
+          `Error al archivar la jornada: ${result.error}. La ruta se ha conservado intacta.`,
+        );
+      } else if (result.status === "SESSION_MISMATCH") {
+        alert(result.error);
+      } else if (result.status === "EMPTY_ROUTE") {
+        alert(
+          "No hay paradas activas en la ruta. No se ha generado ningún registro.",
+        );
       }
-      window.location.reload();
+    } finally {
+      isClosingJornadaRef.current = false;
     }
   };
 
@@ -1765,6 +1806,7 @@ const App: React.FC = () => {
                   <div className="flex flex-wrap gap-4">
                     <button
                       type="button"
+                      onClick={() => setIsRegistroOpen(true)}
                       className="bg-slate-900 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-slate-800 transition-all uppercase text-xs"
                     >
                       REGISTRO
@@ -2104,6 +2146,11 @@ const App: React.FC = () => {
       >
         <BillingSection />
       </section>
+      <RegistroModal
+        isOpen={isRegistroOpen}
+        onClose={() => setIsRegistroOpen(false)}
+        userId={user?.id}
+      />
     </div>
   );
 };
