@@ -63,8 +63,10 @@ import {
   validateMapsUrl,
 } from "./mapsUrlService";
 import { userStorageKey } from "./destinatariosService";
-import { executeCerrarJornada } from "./registroJornadasService";
-import { RegistroModal } from "./RegistroModal";
+import { RouteCloudPanel } from "./RouteCloudPanel";
+import { loadRouteSnapshot, saveRouteSnapshot } from "./routeSnapshotStorage";
+import type { RemoteRoute } from "./rutasSupabaseService";
+import { RegistroNubeModal as RegistroModal } from "./RegistroNubeModal";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -420,6 +422,7 @@ const App: React.FC = () => {
 
   const [manualSequence, setManualSequence] = useState<string[]>([]);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
+  const [routeStorageError, setRouteStorageError] = useState<string | null>(null);
 
   const [viewMode, setViewMode] = useState<
     "split" | "map" | "list" | "control"
@@ -461,6 +464,9 @@ const App: React.FC = () => {
   const [isAppClosed, setIsAppClosed] = useState(false);
   const [isRegistroOpen, setIsRegistroOpen] = useState(false);
   const isClosingJornadaRef = useRef(false);
+  const cloudCloseRef = useRef<(() => Promise<void>) | null>(null);
+  const sessionUserRef = useRef<string | null>(null);
+  sessionUserRef.current = user?.id ?? null;
   const [currentUserLoc, setCurrentUserLoc] = useState<
     { latitude: number; longitude: number } | undefined
   >(undefined);
@@ -586,9 +592,21 @@ const App: React.FC = () => {
       setHydratedUserId(null);
       return;
     }
-    setDeliveries(loadDeliveriesForUser(userId));
-    setManualSequence(loadSequenceForUser(userId));
-    setHydratedUserId(userId);
+    try {
+      const snapshot = loadRouteSnapshot(userId, () => ({
+        deliveries: JSON.parse(localStorage.getItem(deliveriesStorageKey(userId)) ?? "[]"),
+        sequence: JSON.parse(localStorage.getItem(sequenceStorageKey(userId)) ?? "[]"),
+      }));
+      setDeliveries(snapshot.deliveries);
+      setManualSequence(snapshot.sequence);
+      setRouteStorageError(null);
+      setHydratedUserId(userId);
+    } catch (error) {
+      setDeliveries([]);
+      setManualSequence([]);
+      setHydratedUserId(null);
+      setRouteStorageError(`No se pudo recuperar la ruta local: ${error instanceof Error ? error.message : String(error)}. No borres el almacenamiento.`);
+    }
   }, [user?.id]);
 
   useEffect(() => {
@@ -598,7 +616,8 @@ const App: React.FC = () => {
       // usuario autenticado y cuando el estado en memoria corresponde ya a su
       // hidratación; así nunca se escribe el estado de A bajo la clave de B.
       if (user && canPersistForCurrentSession(user, hydratedUserId)) {
-        persistUserScopedJornada(user.id, deliveries, manualSequence);
+        const ok = saveRouteSnapshot(user.id, deliveries, manualSequence);
+        setRouteStorageError(ok ? null : "No se pudo guardar la ruta local. Conserva la aplicación abierta y revisa el almacenamiento antes de continuar.");
       }
       localStorage.setItem(VIEW_MODE_KEY, viewMode);
     } catch {
@@ -1195,51 +1214,13 @@ const App: React.FC = () => {
 
   const handleClearAll = async () => {
     if (isClosingJornadaRef.current) return;
-    if (!user?.id || hydratedUserId !== user.id) {
-      alert(
-        "No se puede cerrar la jornada: la sesión no está lista o pertenece a otro usuario.",
-      );
+    if (!user?.id || hydratedUserId !== user.id || !cloudCloseRef.current) {
+      alert("Espera a que la sesión y el servicio de nube estén preparados.");
       return;
     }
-
     isClosingJornadaRef.current = true;
-    try {
-      const result = await executeCerrarJornada({
-        user,
-        hydratedUserId,
-        deliveries,
-        manualSequence,
-        persistRouteFn: persistUserScopedJornadaWithRollback,
-        onRouteCleared: () => {
-          setDeliveries([]);
-          setManualSequence([]);
-        },
-      });
-
-      if (result.status === "SUCCESS") {
-        alert("Jornada cerrada correctamente y archivada en el Registro.");
-      } else if (result.status === "RECOVERY_COMPLETED") {
-        alert(
-          "Se ha completado la recuperación del cierre pendiente anterior y se ha vaciado la ruta.",
-        );
-      } else if (result.status === "PARTIAL_SUCCESS") {
-        alert(result.error);
-      } else if (result.status === "CLOSURE_CONFLICT") {
-        alert(`Conflicto de cierre: ${result.error}`);
-      } else if (result.status === "ARCHIVE_FAILED") {
-        alert(
-          `Error al archivar la jornada: ${result.error}. La ruta se ha conservado intacta.`,
-        );
-      } else if (result.status === "SESSION_MISMATCH") {
-        alert(result.error);
-      } else if (result.status === "EMPTY_ROUTE") {
-        alert(
-          "No hay paradas activas en la ruta. No se ha generado ningún registro.",
-        );
-      }
-    } finally {
-      isClosingJornadaRef.current = false;
-    }
+    try { await cloudCloseRef.current(); }
+    finally { isClosingJornadaRef.current = false; }
   };
 
   const handleOptimizeRoute = () => {
@@ -1406,6 +1387,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
+      {routeStorageError && <div role="alert" className="shrink-0 border-b border-red-300 bg-red-50 p-3 text-sm text-red-900">{routeStorageError}</div>}
       <header className="z-50 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 shadow-sm sm:flex-nowrap sm:gap-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-2">
           <Truck className="shrink-0 text-blue-600" size={22} />
@@ -1718,6 +1700,29 @@ const App: React.FC = () => {
             </div>
           )}
 
+          <RouteCloudPanel
+            key={user.id}
+            userId={user.id}
+            hydratedUserId={hydratedUserId}
+            deliveries={deliveries}
+            sequence={manualSequence}
+            registerClose={(close) => {
+              cloudCloseRef.current = close;
+              return () => {
+                if (cloudCloseRef.current === close) {
+                  cloudCloseRef.current = null;
+                }
+              };
+            }}
+            applyRoute={(ownerId: string, route: RemoteRoute) => {
+              if (sessionUserRef.current !== ownerId || hydratedUserId !== ownerId) return false;
+              if (!saveRouteSnapshot(ownerId, route.deliveries, route.sequence)) return false;
+              setDeliveries(route.deliveries);
+              setManualSequence(route.sequence);
+              setSelectedId(null);
+              return true;
+            }}
+          />
           {/* MAIN */}
           <main className="flex-1 flex flex-col sm:flex-row overflow-hidden">
             {viewMode === "control" ? (
@@ -1730,7 +1735,7 @@ const App: React.FC = () => {
                       </h2>
                       <div className="flex items-center gap-2 mt-1">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          Rutas · Gestión local
+                          Rutas · Guardado manual en Supabase
                         </p>
                       </div>
                     </div>
