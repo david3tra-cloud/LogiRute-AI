@@ -19,7 +19,7 @@ export const RegistroNubeModal: React.FC<Props> = ({ isOpen, onClose, userId }) 
     const local = loadRegistroJornadasWithStatus(userId);
     setItems(local.items);
     setBusy(true);
-    setNotice(local.corrupted ? "El Registro local contiene datos inválidos. No se modifica." : "Consultando Registro en Supabase...");
+    setNotice(local.corrupted ? "El Registro local contiene datos inválidos. No se modifica." : "Cargando registro...");
     void listRemoteJornadas(userId).then(remote => {
       if (generation.current !== token) return;
       const merged = new Map(local.items.map(item => [item.id, item]));
@@ -31,7 +31,7 @@ export const RegistroNubeModal: React.FC<Props> = ({ isOpen, onClose, userId }) 
       }
       setRemoteIds(new Set(remote.map(item => item.id)));
       setItems([...merged.values()].sort((a, b) => Date.parse(b.fechaCierre) - Date.parse(a.fechaCierre)));
-      setNotice(`${remote.length} jornadas confirmadas en nube. Las marcadas como locales aún no se han migrado.${conflicts ? ` ${conflicts} IDs tienen contenido distinto; se muestra la versión de nube sin borrar el archivo local.` : ""}${local.corrupted ? " El Registro local requiere revisión." : ""}`);
+      setNotice(`${conflicts ? `${conflicts} jornadas tienen diferencias entre la copia local y la nube; se muestra la versión de nube sin borrar la local.` : ""}${local.corrupted ? " El Registro local requiere revisión." : ""}`);
     }).catch(error => {
       if (generation.current === token) setNotice(`No se pudo consultar Supabase: ${String(error?.message ?? error)}. Solo se muestran los datos locales de esta cuenta.`);
     }).finally(() => { if (generation.current === token) setBusy(false); });
@@ -44,11 +44,10 @@ export const RegistroNubeModal: React.FC<Props> = ({ isOpen, onClose, userId }) 
     <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-3xl bg-white shadow-2xl">
       <header className="flex items-center justify-between gap-3 border-b p-5">
         <h2 id="registro-nube-title" className="text-xl font-black">Registro de jornadas</h2>
+        <button type="button" disabled={busy} onClick={() => setRefresh(n => n + 1)} aria-label="Actualizar registro" title="Actualizar registro" className="ml-auto rounded border px-3 py-2 disabled:opacity-40">&#8635;</button>
         <button type="button" onClick={onClose} className="rounded border px-3 py-2">Cerrar</button>
       </header>
-      <div className="border-b bg-blue-50 p-4 text-xs" role="status">{notice}
-        <button type="button" disabled={busy} onClick={() => setRefresh(n => n + 1)} className="ml-3 rounded border bg-white px-3 py-2 disabled:opacity-40">Actualizar</button>
-      </div>
+      {(busy || notice) && <div className="border-b bg-blue-50 p-4 text-xs" role="status">{notice}</div>}
       <div className="space-y-3 overflow-y-auto p-5">
         {!visible.length && <p>{busy ? "Cargando..." : "Todavía no hay jornadas archivadas."}</p>}
         {visible.map(item => {

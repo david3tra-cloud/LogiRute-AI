@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
+import { syncRouteStep, readAutoBase, writeAutoBase } from "./routeAutoSync.mjs";
 import { isDefinitiveRevisionConflict, retireClosureMarker } from "./routeCloudRecovery";
 import { Delivery, JornadaRegistro } from "./types";
-import { loadRemoteRoute, saveRemoteRoute, RemoteRoute } from "./rutasSupabaseService";
+import { loadRemoteRoute, saveRemoteRoute, RemoteRoute, RouteConflictError } from "./rutasSupabaseService";
 import { computeRouteFingerprint, generateStableId, loadPendingClosureMarker, isJornadaRegistro } from "./registroJornadasService";
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
   hydratedUserId: string | null;
   deliveries: Delivery[];
   sequence: string[];
+  suspendAuto?: boolean;
   applyRoute: (userId: string, route: RemoteRoute) => boolean;
   registerClose: (close: () => Promise<void>) => () => void;
 }
@@ -20,7 +22,7 @@ const messageOf = (e: unknown) => e instanceof Error ? e.message : String((e as 
 
 export const RouteCloudPanel: React.FC<Props> = props => {
   const latest = useRef(props);
-  latest.current = props;
+  useLayoutEffect(() => { latest.current = props; }, [props]);
   const operation = useRef(false);
   const generation = useRef(0);
   const meta = useRef<RemoteRoute | null | undefined>(undefined);
@@ -30,6 +32,12 @@ export const RouteCloudPanel: React.FC<Props> = props => {
   const [saved, setSaved] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const autoFlight = useRef<Promise<void> | null>(null);
+  const manualRequested = useRef(false);
+  const autoPaused = useRef(false);
+  const autoTick = useRef<(() => Promise<void>) | null>(null);
+  const [autoWorking, setAutoWorking] = useState(false);
+  const [showTools, setShowTools] = useState(false);
   const uid = props.userId;
   const currentSignature = signature(props.deliveries, props.sequence);
 
@@ -58,38 +66,102 @@ export const RouteCloudPanel: React.FC<Props> = props => {
     const marker = loadPendingClosureMarker(uid);
     if (marker && marker.status !== "COMPLETED") throw new Error("Hay un cierre local anterior pendiente. No se modifica la nube hasta revisarlo.");
   }
+  function remember(row: RemoteRoute) {
+    const fp = signature(row.deliveries, row.sequence);
+    writeAutoBase(uid, row, fp, localStorage);
+    meta.current = row; setReady(true); setSaved(fp);
+    autoPaused.current = false; setShowTools(false);
+  }
   async function run(action: (valid: () => boolean) => Promise<void>) {
-    if (operation.current || latest.current.hydratedUserId !== uid) return;
-    operation.current = true;
-    setBusy(true);
-    generation.current++;
-    const { valid } = context();
-    try { await action(valid); }
-    catch (e) { if (valid()) setNotice(`No confirmado: ${messageOf(e)}. Los datos locales se conservan. Si falló un guardado, carga de nube para comprobar su resultado antes de repetirlo.`); }
-    finally { if (valid()) { operation.current = false; setBusy(false); } }
+    if (manualRequested.current || (operation.current && !autoFlight.current) || latest.current.hydratedUserId !== uid) return;
+    const waitGeneration = generation.current;
+    manualRequested.current = true;
+    try {
+      if (autoFlight.current) await autoFlight.current;
+      if (generation.current !== waitGeneration || latest.current.hydratedUserId !== uid) return;
+      operation.current = true; setBusy(true);
+      generation.current++;
+      const { valid } = context();
+      try { await action(valid); }
+      catch (e) { if (valid()) { setShowTools(true); setNotice(`No confirmado: ${messageOf(e)}. Se conservan los datos locales.`); } }
+      finally { if (valid()) { operation.current = false; setBusy(false); } }
+    } finally { manualRequested.current = false; }
   }
   useEffect(() => {
     generation.current++;
-    const token = generation.current;
     operation.current = false;
     meta.current = undefined;
-    setReady(false); setBusy(false); setSaved(null); setBlocked(false); setPending(false);
+    autoPaused.current = false;
+    setReady(false); setBusy(false); setSaved(null); setBlocked(false); setPending(false); setShowTools(false);
     if (props.hydratedUserId !== uid) return;
-    let cancelled = false;
     try {
-      const marker = readPending();
-      setPending(Boolean(marker));
+      setPending(Boolean(readPending()));
       legacyGuard();
-    } catch (e) { setBlocked(true); setNotice(messageOf(e)); return; }
-    void loadRemoteRoute(uid).then(route => {
-      if (cancelled || generation.current !== token) return;
-      meta.current = route; setReady(true);
-      const same = route && signature(route.deliveries, route.sequence) === signature(latest.current.deliveries, latest.current.sequence);
-      if (same) setSaved(signature(route.deliveries, route.sequence));
-      setNotice(route ? "Ruta en nube disponible. Cargar no es automático: conserva primero los cambios que necesites." : "Todavía no hay ruta en nube. Pulsa Guardar en nube para subir la de este dispositivo.");
-    }).catch(e => { if (!cancelled && generation.current === token) setNotice(`No se pudo consultar Supabase: ${messageOf(e)}. Puedes reintentar con Cargar de nube.`); });
-    return () => { cancelled = true; generation.current++; };
+      readAutoBase(uid, localStorage);
+      setNotice("Conectando sincronización automática...");
+    } catch (e) { autoPaused.current = true; setBlocked(true); setShowTools(true); setNotice(messageOf(e)); }
+    return () => { generation.current++; };
   }, [uid, props.hydratedUserId]);
+
+  async function tick() {
+    if (operation.current || manualRequested.current || autoPaused.current || latest.current.suspendAuto || latest.current.hydratedUserId !== uid || document.visibilityState === "hidden") return;
+    operation.current = true; setAutoWorking(true);
+    const { valid } = context();
+    const task = (async () => {
+      try {
+        legacyGuard();
+        const result = await syncRouteStep({
+          userId: uid,
+          isCurrent: valid,
+          isBlocked: () => Boolean(readPending()) || Boolean(latest.current.suspendAuto),
+          readBase: () => readAutoBase(uid, localStorage),
+          getLocal: () => ({ deliveries: latest.current.deliveries, sequence: latest.current.sequence }),
+          fingerprint: signature,
+          load: () => loadRemoteRoute(uid),
+          save: (deliveries, sequence, revision) => saveRemoteRoute(uid, deliveries, sequence, revision),
+          backup,
+          apply: row => latest.current.applyRoute(uid, row),
+          accept: remember,
+        });
+        if (!valid()) return;
+        if (result.kind === "conflict") {
+          autoPaused.current = true;
+          meta.current = result.row; setReady(true); setSaved(null); setShowTools(true);
+          setNotice("Requiere revisión: hay versiones diferentes. No se ha sobrescrito ninguna. Elige cargar la nube o conservar esta ruta.");
+        } else if (result.kind === "paused") {
+          setPending(Boolean(readPending()));
+        } else if (result.kind !== "defer") {
+          setNotice(result.kind === "pull" ? "Cambios del otro dispositivo recibidos." : "Guardado en tu cuenta.");
+        }
+      } catch (e) {
+        if (valid()) {
+          if (e instanceof RouteConflictError) { autoPaused.current = true; setSaved(null); }
+          setShowTools(true);
+          setNotice(`Sin confirmar: ${messageOf(e)}. No se borran los cambios locales.`);
+        }
+      } finally { if (valid()) { operation.current = false; setAutoWorking(false); } }
+    })();
+    autoFlight.current = task;
+    try { await task; } finally { if (autoFlight.current === task) autoFlight.current = null; }
+  }
+  useEffect(() => { autoTick.current = tick; });
+  useEffect(() => {
+    if (props.hydratedUserId !== uid) return;
+    const request = () => { void autoTick.current?.(); };
+    const initial = window.setTimeout(request, 0);
+    const timer = window.setInterval(request, 4000);
+    window.addEventListener("focus", request);
+    document.addEventListener("visibilitychange", request);
+    return () => {
+      window.clearTimeout(initial); window.clearInterval(timer);
+      window.removeEventListener("focus", request);
+      document.removeEventListener("visibilitychange", request);
+    };
+  }, [uid, props.hydratedUserId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void autoTick.current?.(); }, 700);
+    return () => window.clearTimeout(timer);
+  }, [currentSignature, uid]);
 
   async function saveSnapshot(valid: () => boolean) {
     legacyGuard();
@@ -103,12 +175,12 @@ export const RouteCloudPanel: React.FC<Props> = props => {
     if (remote && signature(remote.deliveries, remote.sequence) !== fingerprint && saved === null && !window.confirm("La ruta de nube y la de este dispositivo son distintas. ¿Guardar esta ruta local como versión compartida? La nube rechazará la operación si otro dispositivo ya la cambió.")) return null;
     const row = await saveRemoteRoute(uid, deliveries, sequence, remote?.revision ?? null);
     if (!valid()) return null;
-    meta.current = row; setReady(true); setSaved(fingerprint);
+    remember(row);
     return { row, fingerprint };
   }
   const save = () => run(async valid => {
     const result = await saveSnapshot(valid);
-    if (result && valid()) setNotice("Guardado confirmado en Supabase. En el otro dispositivo pulsa Cargar de nube.");
+    if (result && valid()) setNotice("Guardado en tu cuenta. Sincronización automática activada.");
   });
   const load = () => run(async valid => {
     if (readPending()) throw new Error("Hay un cierre remoto pendiente: reintenta Cerrar jornada.");
@@ -121,7 +193,7 @@ export const RouteCloudPanel: React.FC<Props> = props => {
     if (before !== signature(route.deliveries, route.sequence) && !window.confirm("¿Cargar la ruta de nube y sustituir la que se ve en este dispositivo? Se conservará una copia local de seguridad de la ruta actual.")) { setSaved(null); setNotice("Carga cancelada. No se ha sustituido la ruta local."); return; }
     backup();
     if (!latest.current.applyRoute(uid, route)) throw new Error("No se pudo guardar la copia local de la ruta recibida.");
-    setSaved(signature(route.deliveries, route.sequence)); setNotice("Ruta cargada desde Supabase.");
+    remember(route); setNotice("Ruta de tu cuenta cargada. Sincronización automática activada.");
   });
   const close = () => run(async valid => {
     legacyGuard();
@@ -146,6 +218,7 @@ export const RouteCloudPanel: React.FC<Props> = props => {
         retireClosureMarker(pendingKey(uid), marker);
         meta.current = undefined;
         setReady(false); setPending(false); setSaved(null);
+        autoPaused.current = true; setShowTools(true);
         setNotice("El servidor rechazó este cierre por un cambio de revisión. No se ha vaciado la ruta local. Consulta Cargar de nube y decide qué versión conservar antes de volver a cerrar.");
         return;
       }
@@ -160,28 +233,29 @@ export const RouteCloudPanel: React.FC<Props> = props => {
     if (signature(latest.current.deliveries, latest.current.sequence) !== marker.fingerprint && signature(latest.current.deliveries, latest.current.sequence) !== signature(row.deliveries, row.sequence)) {
       backup();
       retireClosureMarker(pendingKey(uid), marker);
-      meta.current = row; setReady(true); setSaved(null); setPending(false);
+      remember(row); setSaved(null); setPending(false);
+      autoPaused.current = true; setShowTools(true);
       setNotice("La jornada está confirmada en el Registro de nube. Se han conservado los cambios locales posteriores SIN sustituirlos ni subirlos. Antes de guardar otra vez, revisa las paradas para no reintroducir las de la jornada cerrada.");
       return;
     }
     backup();
     if (!latest.current.applyRoute(uid, row)) throw new Error("La jornada está en nube, pero falló el guardado local. Reintenta el cierre.");
-    meta.current = row; setSaved(signature(row.deliveries, row.sequence));
+    remember(row);
     retireClosureMarker(pendingKey(uid), marker); setPending(false);
     setNotice("Jornada archivada en Supabase. Ruta compartida actualizada. Puedes abrir Registro en ambos dispositivos.");
   });
   useEffect(() => {
     return props.registerClose(close);
   }, [close, props.registerClose]);
-  const disabled = busy || blocked || props.hydratedUserId !== uid;
-  return <aside className="shrink-0 border-b border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950" aria-label="Sincronización de rutas">
-    <p role="status">{busy ? "Operación en curso. Espera antes de cambiar de dispositivo." : notice}</p>
-    <p className="mt-1">{pending ? "Cierre pendiente de confirmar: usa Reintentar cierre." : saved === currentSignature ? "Esta versión coincide con la última confirmada; no se comprueban cambios remotos en tiempo real." : "Ruta local sin confirmar en nube. Guardado manual."}</p>
-    <div className="mt-2 flex flex-wrap gap-2">
-      <button type="button" disabled={disabled || pending} onClick={load} className="rounded border bg-white px-3 py-2 disabled:opacity-40">Cargar de nube</button>
-      <button type="button" disabled={disabled || !ready || pending} onClick={save} className="rounded bg-blue-700 px-3 py-2 text-white disabled:opacity-40">Guardar en nube</button>
+  const disabled = busy || autoWorking || blocked || props.hydratedUserId !== uid;
+  if (!busy && !pending && !showTools && !blocked) return null;
+  return <aside className="shrink-0 border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700" aria-label="Sincronización de rutas">
+    <p role="status">{busy ? "Procesando cierre o revisión..." : autoWorking ? "Sincronizando..." : pending ? "Cierre pendiente de confirmar." : notice}</p>
+    {(showTools || pending || blocked) && <div className="mt-2 flex flex-wrap gap-2">
+      <button type="button" disabled={disabled || pending} onClick={load} className="rounded border bg-white px-3 py-2 disabled:opacity-40">Cargar versión de nube</button>
+      <button type="button" disabled={disabled || !ready || pending} onClick={save} className="rounded bg-blue-700 px-3 py-2 text-white disabled:opacity-40">Conservar esta ruta en nube</button>
       {pending && <button type="button" disabled={disabled} onClick={close} className="rounded border bg-white px-3 py-2">Reintentar cierre</button>}
-    </div>
+    </div>}
     {busy && <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/70 p-6 text-center text-white" role="alert">Procesando con Supabase. No cierres la aplicación.</div>}
   </aside>;
 };

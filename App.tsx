@@ -1704,6 +1704,7 @@ const App: React.FC = () => {
             key={user.id}
             userId={user.id}
             hydratedUserId={hydratedUserId}
+            suspendAuto={isAdding || isParsing || isResolvingMapsUrl || isOptimizing}
             deliveries={deliveries}
             sequence={manualSequence}
             registerClose={(close) => {
@@ -1735,7 +1736,7 @@ const App: React.FC = () => {
                       </h2>
                       <div className="flex items-center gap-2 mt-1">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          Rutas · Guardado manual en Supabase
+                          Rutas · Sincronización automática
                         </p>
                       </div>
                     </div>
