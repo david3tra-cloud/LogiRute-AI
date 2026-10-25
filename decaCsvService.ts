@@ -1,11 +1,10 @@
 import type { DeCA } from "./types";
 import {
   normalizeCsvHeader,
-  normalizeRecipientText,
   parseCsvRows,
 } from "./destinatariosService";
 
-const DECA_CSV_HEADERS = [
+export const REQUIRED_DECA_CSV_HEADERS = [
   "fecha",
   "cargador",
   "destinatario",
@@ -13,6 +12,27 @@ const DECA_CSV_HEADERS = [
   "mercancia",
   "bultos",
   "peso_kg",
+] as const;
+
+export const OPTIONAL_DECA_CSV_HEADERS = [
+  "direccion_destino",
+  "transportista",
+  "matricula",
+  "referencia_albaran",
+] as const;
+
+export const DECA_CSV_HEADERS = [
+  "fecha",
+  "cargador",
+  "destinatario",
+  "direccion_destino",
+  "ciudad_destino",
+  "mercancia",
+  "bultos",
+  "peso_kg",
+  "transportista",
+  "matricula",
+  "referencia_albaran",
 ] as const;
 
 export type DecaCsvRow = {
@@ -52,16 +72,19 @@ const parseWeight = (value: string) => {
 const isValidPackageCount = (value: string) =>
   /^\d+$/.test(value) && Number.isSafeInteger(Number(value));
 
-const decaDuplicateKey = (
-  deca: Pick<DeCA, "fecha" | "cargador" | "destinatario">,
-) =>
-  [deca.fecha, deca.cargador, deca.destinatario]
-    .map(normalizeRecipientText)
-    .join("\u0000");
+const createUniqueDecaId = (index: number): string => {
+  if (
+    typeof globalThis.crypto !== "undefined" &&
+    typeof globalThis.crypto.randomUUID === "function"
+  ) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
+};
 
 export const previewDecasCsv = (
   content: string,
-  existing: DeCA[] = [],
+  _existing: DeCA[] = [],
 ): DecaCsvPreview => {
   try {
     const rawRows = parseCsvRows(content);
@@ -78,13 +101,11 @@ export const previewDecasCsv = (
       const normalized = normalizeCsvHeader(header);
       if (!headerIndexes.has(normalized)) headerIndexes.set(normalized, index);
     });
-    const requiredHeaders = DECA_CSV_HEADERS.map((header) => ({
-      header,
-      normalized: normalizeCsvHeader(header),
-    }));
-    const missingHeaders = requiredHeaders
-      .filter(({ normalized }) => !headerIndexes.has(normalized))
-      .map(({ header }) => header);
+
+    const missingHeaders = REQUIRED_DECA_CSV_HEADERS.filter(
+      (header) => !headerIndexes.has(normalizeCsvHeader(header)),
+    );
+
     if (missingHeaders.length > 0) {
       return {
         rows: [],
@@ -103,37 +124,55 @@ export const previewDecasCsv = (
         headerError: "El CSV no contiene filas de datos.",
       };
     }
-    const seenKeys = new Set(existing.map(decaDuplicateKey));
-    const rows = dataRows.map((cells, index): DecaCsvRow => {
-      const values = Object.fromEntries(
-        requiredHeaders.map(({ header, normalized }) => [
-          header,
-          (cells[headerIndexes.get(normalized)!] ?? "").trim(),
-        ]),
-      ) as Record<(typeof DECA_CSV_HEADERS)[number], string>;
 
-      const missingValues = DECA_CSV_HEADERS.filter(
-        (header) => !values[header],
-      );
+    const rows = dataRows.map((cells, index): DecaCsvRow => {
+      const getVal = (header: string) => {
+        const idx = headerIndexes.get(normalizeCsvHeader(header));
+        return (idx !== undefined && cells[idx] !== undefined ? cells[idx] : "").trim();
+      };
+
+      const fecha = getVal("fecha");
+      const cargador = getVal("cargador");
+      const destinatario = getVal("destinatario");
+      const ciudadDestino = getVal("ciudad_destino");
+      const mercancia = getVal("mercancia");
+      const bultos = getVal("bultos");
+      const pesoKgRaw = getVal("peso_kg");
+
+      const direccionDestino = getVal("direccion_destino");
+      const transportista = getVal("transportista");
+      const matriculaVehiculo = getVal("matricula");
+      const referenciaAlbaran = getVal("referencia_albaran");
+
+      const missingValues: string[] = [];
+      if (!fecha) missingValues.push("fecha");
+      if (!cargador) missingValues.push("cargador");
+      if (!destinatario) missingValues.push("destinatario");
+      if (!ciudadDestino) missingValues.push("ciudad_destino");
+      if (!mercancia) missingValues.push("mercancia");
+      if (!bultos) missingValues.push("bultos");
+      if (!pesoKgRaw) missingValues.push("peso_kg");
+
       if (missingValues.length > 0) {
         return {
           rowNumber: index + 2,
           reason: `Falta valor en: ${missingValues.join(", ")}.`,
         };
       }
-      if (!normalizeDate(values.fecha)) {
+
+      if (!normalizeDate(fecha)) {
         return {
           rowNumber: index + 2,
           reason: "La fecha debe tener formato AAAA-MM-DD y ser válida.",
         };
       }
-      if (!isValidPackageCount(values.bultos)) {
+      if (!isValidPackageCount(bultos)) {
         return {
           rowNumber: index + 2,
           reason: "bultos debe ser un número entero no negativo.",
         };
       }
-      const pesoKg = parseWeight(values.peso_kg);
+      const pesoKg = parseWeight(pesoKgRaw);
       if (pesoKg === null) {
         return {
           rowNumber: index + 2,
@@ -141,37 +180,20 @@ export const previewDecasCsv = (
         };
       }
 
-      const duplicateCandidate = {
-        fecha: values.fecha,
-        cargador: values.cargador,
-        destinatario: values.destinatario,
-      };
-      const duplicateKey = decaDuplicateKey(duplicateCandidate);
-      if (seenKeys.has(duplicateKey)) {
-        return {
-          rowNumber: index + 2,
-          duplicate: true,
-          reason: "Duplicado por fecha, cargador y destinatario.",
-        };
-      }
-      seenKeys.add(duplicateKey);
-
       const now = new Date().toISOString();
       const deca: DeCA = {
-        id:
-          globalThis.crypto?.randomUUID?.() ??
-          `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
-        fecha: values.fecha,
-        cargador: values.cargador,
-        transportista: "",
-        destinatario: values.destinatario,
-        direccionDestino: "",
-        ciudadDestino: values.ciudad_destino,
-        mercancia: values.mercancia,
-        numeroBultos: values.bultos,
+        id: createUniqueDecaId(index),
+        fecha,
+        cargador,
+        transportista,
+        destinatario,
+        direccionDestino,
+        ciudadDestino,
+        mercancia,
+        numeroBultos: bultos,
         pesoKg,
-        referenciaAlbaran: "",
-        matriculaVehiculo: "",
+        referenciaAlbaran,
+        matriculaVehiculo,
         notas: "",
         estado: "borrador",
         createdAt: now,
@@ -192,4 +214,4 @@ export const previewDecasCsv = (
 };
 
 export const decaTemplateCsv = () =>
-  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Valencia;Mercancía de ejemplo;12;1250.5`;
+  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Calle Mayor 12;Valencia;Mercancía de ejemplo;12;1250.5;Transportes Rápidos S.A.;1234-BBB;ALB-2026-001`;

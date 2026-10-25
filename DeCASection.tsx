@@ -4678,9 +4678,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       row.deca && !row.reason ? [row.deca] : [],
     ) ?? [];
   const invalidCsvRows =
-    decaCsvPreview?.rows.filter((row) => row.reason && !row.duplicate) ?? [];
-  const duplicateCsvRows =
-    decaCsvPreview?.rows.filter((row) => row.duplicate) ?? [];
+    decaCsvPreview?.rows.filter((row) => Boolean(row.reason)) ?? [];
 
   const bulkCommonErrors: Partial<Record<"fecha" | "cargador" | "matriculaVehiculo", string>> = {};
   if (!bulkCommon.fecha.trim()) {
@@ -6020,8 +6018,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   <p className="mt-1 text-sm text-slate-600">
                     El CSV debe incluir fecha (AAAA-MM-DD), cargador,
                     destinatario, ciudad_destino, mercancia, bultos y peso_kg.
-                    Todas las columnas son obligatorias; las filas importadas se
-                    crearán como borradores.
+                    Opcionalmente puedes incluir direccion_destino,
+                    transportista, matricula y referencia_albaran. Las filas
+                    importadas se crearán como borradores.
+                  </p>
+                  <p className="mt-2 rounded-lg border border-blue-100 bg-blue-50/70 p-2.5 text-xs text-blue-900">
+                    Cada fila válida se importará como un DeCA nuevo. Si vuelves a importar el mismo archivo, se crearán nuevos registros.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -6057,9 +6059,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   <>
                     <p className="text-sm text-slate-600">
                       Filas detectadas: {decaCsvPreview.detectedRows} · válidas:{" "}
-                      {validCsvDecas.length} · inválidas:{" "}
-                      {invalidCsvRows.length} · duplicadas:{" "}
-                      {duplicateCsvRows.length}
+                      {validCsvDecas.length} · con errores:{" "}
+                      {invalidCsvRows.length}
                     </p>
                     {decaCsvPreview.headerError && (
                       <p role="alert" className="text-sm text-red-700">
@@ -6071,17 +6072,21 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                         <p className="mb-1 text-sm font-bold text-slate-800">
                           Previsualización de filas válidas (máximo 10)
                         </p>
-                        <table className="w-full min-w-[640px] text-left text-xs">
+                        <table className="w-full min-w-[800px] text-left text-xs">
                           <thead>
                             <tr className="border-b text-slate-500">
                               <th className="p-2">Fila</th>
                               <th className="p-2">Fecha</th>
                               <th className="p-2">Cargador</th>
+                              <th className="p-2">Transportista</th>
+                              <th className="p-2">Matrícula</th>
                               <th className="p-2">Destinatario</th>
+                              <th className="p-2">Dirección</th>
                               <th className="p-2">Ciudad</th>
                               <th className="p-2">Mercancía</th>
                               <th className="p-2">Bultos</th>
                               <th className="p-2">Peso (kg)</th>
+                              <th className="p-2">Ref. Albarán</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -6093,31 +6098,28 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                                   <td className="p-2">{row.rowNumber}</td>
                                   <td className="p-2">{row.deca?.fecha}</td>
                                   <td className="p-2">{row.deca?.cargador}</td>
-                                  <td className="p-2">
-                                    {row.deca?.destinatario}
-                                  </td>
-                                  <td className="p-2">
-                                    {row.deca?.ciudadDestino}
-                                  </td>
+                                  <td className="p-2">{row.deca?.transportista || "-"}</td>
+                                  <td className="p-2">{row.deca?.matriculaVehiculo || "-"}</td>
+                                  <td className="p-2">{row.deca?.destinatario}</td>
+                                  <td className="p-2">{row.deca?.direccionDestino || "-"}</td>
+                                  <td className="p-2">{row.deca?.ciudadDestino}</td>
                                   <td className="p-2">{row.deca?.mercancia}</td>
-                                  <td className="p-2">
-                                    {row.deca?.numeroBultos}
-                                  </td>
+                                  <td className="p-2">{row.deca?.numeroBultos}</td>
                                   <td className="p-2">{row.deca?.pesoKg}</td>
+                                  <td className="p-2">{row.deca?.referenciaAlbaran || "-"}</td>
                                 </tr>
                               ))}
                           </tbody>
                         </table>
                       </div>
                     )}
-                    {(invalidCsvRows.length > 0 ||
-                      duplicateCsvRows.length > 0) && (
+                    {invalidCsvRows.length > 0 && (
                       <div className="max-h-48 overflow-auto rounded border border-amber-200 bg-amber-50 p-3">
                         <p className="mb-2 text-sm font-bold text-amber-900">
-                          Filas omitidas
+                          Filas con errores
                         </p>
                         <ul className="space-y-1 text-xs text-amber-900">
-                          {[...invalidCsvRows, ...duplicateCsvRows]
+                          {invalidCsvRows
                             .sort(
                               (left, right) => left.rowNumber - right.rowNumber,
                             )
