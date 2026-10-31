@@ -76,11 +76,35 @@ export async function listRemoteJornadas(userId: string): Promise<JornadaRegistr
     if (error) throw error;
     await assertSession(userId);
     for (const row of data ?? []) {
-      const item = { id: row.id, userId: row.user_id, fingerprint: row.fingerprint, fechaCierre: row.fecha_cierre, resumen: row.resumen, deliveries: row.deliveries, sequence: row.sequence };
+      const deletedAtValue = (row as { deleted_at?: unknown }).deleted_at;
+      const item: JornadaRegistro = { id: row.id, userId: row.user_id, fingerprint: row.fingerprint, fechaCierre: row.fecha_cierre, resumen: row.resumen, deliveries: row.deliveries, sequence: row.sequence, deletedAt: typeof deletedAtValue === 'string' ? deletedAtValue : null };
       if (!isJornadaRegistro(item) || item.userId !== userId) throw new Error('Jornada remota inválida.');
       validateRoute(item.deliveries, item.sequence);
       items.push(item);
     }
     if ((data ?? []).length < pageSize) return items;
   }
+}
+
+export async function deleteRemoteJornada(
+  userId: string,
+  jornadaId: string,
+): Promise<{ id: string; deletedAt: string }> {
+  if (!jornadaId) throw new Error('El ID de la jornada estÃ¡ vacÃ­o.');
+  await assertSession(userId);
+  const { data, error } = await supabase.rpc('eliminar_jornada_remota', {
+    p_id: jornadaId,
+  });
+  if (error) throw error;
+  await assertSession(userId);
+
+  const rows = Array.isArray(data) ? data : data ? [data] : [];
+  if (rows.length !== 1) {
+    throw new Error('El servidor no confirmÃ³ una jornada de esta cuenta.');
+  }
+  const row = rows[0] as { id?: unknown; deleted_at?: unknown };
+  if (row.id !== jornadaId || typeof row.deleted_at !== 'string' || !row.deleted_at) {
+    throw new Error('La respuesta del servidor no confirma el borrado lÃ³gico.');
+  }
+  return { id: row.id, deletedAt: row.deleted_at };
 }

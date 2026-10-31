@@ -250,6 +250,8 @@ console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n
     numeroBultos: "6",
     pesoKg: "850.5",
     referenciaAlbaran: "009988",
+    destinatarioCodigoPostal: "08001",
+    destinatarioPais: "ES",
     matriculaVehiculo: "0011-JKL",
     notas: "Prueba mapeo",
     estado: "borrador",
@@ -269,6 +271,8 @@ console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n
     cargador_nif: null,
     destinatario: localDeca.destinatario,
     destinatario_nif: null,
+    destinatario_codigo_postal: localDeca.destinatarioCodigoPostal,
+    destinatario_pais: localDeca.destinatarioPais,
     transportista: localDeca.transportista,
     transportista_nif: null,
     transportista_direccion: null,
@@ -303,11 +307,44 @@ console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n
   const mappedBack = mapSupabaseDecaToLocal(supabaseRowSimulated);
   assert.equal(mappedBack.direccionDestino, localDeca.direccionDestino);
   assert.equal(mappedBack.ciudadDestino, localDeca.ciudadDestino);
+  assert.equal(mappedBack.destinatarioCodigoPostal, localDeca.destinatarioCodigoPostal);
+  assert.equal(mappedBack.destinatarioPais, localDeca.destinatarioPais);
+  {
+    const optionalDraftCsv = [
+      "fecha;cargador;destinatario;ciudad_destino;mercancia",
+      "2026-10-30;Cargador;Destino;Valencia;Cajas",
+    ].join("\r\n");
+    const optionalDraft = previewDecasCsv(optionalDraftCsv).rows[0].deca;
+    assert.ok(optionalDraft);
+    assert.equal(optionalDraft.numeroBultos, undefined);
+    assert.equal(optionalDraft.pesoKg, undefined);
+    assert.equal(optionalDraft.destinatarioCodigoPostal, undefined);
+    assert.equal(optionalDraft.destinatarioPais, undefined);
+    console.log("PASS 9: CP, país, bultos y peso pueden omitirse en un borrador CSV.");
+
+    const valuesCsv = [
+      "fecha;cargador;destinatario;ciudad_destino;mercancia;bultos;peso_kg;destinatario_codigo_postal;destinatario_pais",
+      "2026-10-30;Cargador;Destino;Valencia;Cajas;0;0;46001;ES",
+    ].join("\r\n");
+    const values = previewDecasCsv(valuesCsv).rows[0].deca;
+    assert.equal(values.numeroBultos, "0");
+    assert.equal(values.pesoKg, "0");
+    assert.equal(values.destinatarioCodigoPostal, "46001");
+    assert.equal(values.destinatarioPais, "ES");
+    console.log("PASS 10: los valores cero y los datos explícitos del destinatario se conservan.");
+
+    const invalidMeasuresCsv = [
+      "fecha;cargador;destinatario;ciudad_destino;mercancia;bultos;peso_kg",
+      "2026-10-30;Cargador;Destino;Valencia;Cajas;bad;bad",
+    ].join("\r\n");
+    assert.match(previewDecasCsv(invalidMeasuresCsv).rows[0].reason, /bultos/);
+    console.log("PASS 11: valores informados inválidos de bultos/peso se rechazan.");
+  }
   assert.equal(mappedBack.transportista, localDeca.transportista);
   assert.equal(mappedBack.matriculaVehiculo, localDeca.matriculaVehiculo);
   assert.equal(mappedBack.referenciaAlbaran, localDeca.referenciaAlbaran);
   console.log("PASS 8: Mapeo bidireccional DeCA <-> Supabase DecaRow verificado para todos los nuevos campos.");
 }
 
-console.log("\nTodas las pruebas de regresión de CSV pasaron satisfactoriamente (8/8).");
+console.log("\nTodas las pruebas de regresión de CSV pasaron satisfactoriamente (11/11).");
 

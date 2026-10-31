@@ -4,7 +4,8 @@ import { syncRouteStep, readAutoBase, writeAutoBase } from "./routeAutoSync.mjs"
 import { isDefinitiveRevisionConflict, retireClosureMarker } from "./routeCloudRecovery";
 import { Delivery, JornadaRegistro } from "./types";
 import { loadRemoteRoute, saveRemoteRoute, RemoteRoute, RouteConflictError } from "./rutasSupabaseService";
-import { computeRouteFingerprint, generateStableId, loadPendingClosureMarker, isJornadaRegistro } from "./registroJornadasService";
+import { computeRouteFingerprint, generateStableId, loadPendingClosureMarker, isJornadaRegistro, rememberDeletedJornadaForUser } from "./registroJornadasService";
+import { isDeletedClosureDuplicate, isDeletedJornada } from "./registroJornadaSync";
 
 interface Props {
   userId: string;
@@ -228,8 +229,25 @@ export const RouteCloudPanel: React.FC<Props> = props => {
     if (!valid()) return;
     const row = data?.route as RemoteRoute;
     const a = data?.jornada;
-    const jornada: JornadaRegistro = { id: a?.id, userId: a?.user_id, fingerprint: a?.fingerprint, fechaCierre: a?.fecha_cierre, resumen: a?.resumen, deliveries: a?.deliveries, sequence: a?.sequence };
+    if (isDeletedClosureDuplicate(
+      { id: a?.id, userId: a?.user_id, fingerprint: a?.fingerprint, deletedAt: a?.deleted_at },
+      { id: marker.id, userId: uid, fingerprint: marker.fingerprint },
+    )) {
+      rememberDeletedJornadaForUser(uid, marker.id);
+      retireClosureMarker(pendingKey(uid), marker);
+      setPending(false);
+      setNotice("Este cierre ya corresponde a un resumen eliminado. No se ha vuelto a archivar ni se ha vaciado la ruta activa.");
+      return;
+    }
+    const jornada: JornadaRegistro = { id: a?.id, userId: a?.user_id, fingerprint: a?.fingerprint, fechaCierre: a?.fecha_cierre, resumen: a?.resumen, deliveries: a?.deliveries, sequence: a?.sequence, deletedAt: typeof a?.deleted_at === "string" ? a.deleted_at : null };
     if (!isJornadaRegistro(jornada) || jornada.userId !== uid || jornada.id !== marker.id || jornada.fingerprint !== marker.fingerprint || !row || row.user_id !== uid || !Array.isArray(row.deliveries) || !Array.isArray(row.sequence) || !Number.isSafeInteger(row.revision)) throw new Error("Respuesta de cierre inválida. Conserva el marcador para revisión.");
+    if (isDeletedJornada(jornada)) {
+      rememberDeletedJornadaForUser(uid, jornada.id);
+      retireClosureMarker(pendingKey(uid), marker);
+      setPending(false);
+      setNotice("Este cierre ya corresponde a un resumen eliminado. No se ha vuelto a archivar ni se ha vaciado la ruta activa.");
+      return;
+    }
     if (signature(latest.current.deliveries, latest.current.sequence) !== marker.fingerprint && signature(latest.current.deliveries, latest.current.sequence) !== signature(row.deliveries, row.sequence)) {
       backup();
       retireClosureMarker(pendingKey(uid), marker);

@@ -10,6 +10,9 @@ type DeCAListCardProps = {
   canShowQr: boolean;
   onOpen: () => void;
   onShowQr: () => void;
+  isSelected?: boolean;
+  selectable?: boolean;
+  onToggle?: (id: string, checked: boolean) => void;
 };
 
 export default function DeCAListCard({
@@ -20,6 +23,9 @@ export default function DeCAListCard({
   canShowQr,
   onOpen,
   onShowQr,
+  isSelected = false,
+  selectable = true,
+  onToggle,
 }: DeCAListCardProps) {
   const [expanded, setExpanded] = useState(false);
   const title = deca.destinatario?.trim() || "Destinatario no indicado";
@@ -45,6 +51,23 @@ export default function DeCAListCard({
       className={`min-w-0 rounded-xl border-2 border-l-[6px] bg-white p-3 shadow-sm transition-shadow hover:shadow-md sm:p-4 ${sideClasses}`}
     >
       <div className="flex min-w-0 items-start gap-2 sm:gap-3">
+        {onToggle && (
+          <input
+            type="checkbox"
+            data-testid={`deca-select-${deca.id}`}
+            checked={isSelected ?? false}
+            disabled={!selectable}
+            aria-label={`Seleccionar DeCA de ${title}`}
+            onChange={(event) => {
+              event.stopPropagation();
+              onToggle(deca.id, event.target.checked);
+            }}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+            className="shrink-0 mt-1 rounded border-slate-300 text-blue-700 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+        )}
         <button
           type="button"
           data-testid={`deca-row-${deca.id}`}

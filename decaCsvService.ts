@@ -10,12 +10,14 @@ export const REQUIRED_DECA_CSV_HEADERS = [
   "destinatario",
   "ciudad_destino",
   "mercancia",
-  "bultos",
-  "peso_kg",
 ] as const;
 
 export const OPTIONAL_DECA_CSV_HEADERS = [
   "direccion_destino",
+  "destinatario_codigo_postal",
+  "destinatario_pais",
+  "bultos",
+  "peso_kg",
   "transportista",
   "matricula",
   "referencia_albaran",
@@ -33,6 +35,8 @@ export const DECA_CSV_HEADERS = [
   "transportista",
   "matricula",
   "referencia_albaran",
+  "destinatario_codigo_postal",
+  "destinatario_pais",
 ] as const;
 
 export type DecaCsvRow = {
@@ -140,6 +144,8 @@ export const previewDecasCsv = (
       const pesoKgRaw = getVal("peso_kg");
 
       const direccionDestino = getVal("direccion_destino");
+      const destinatarioCodigoPostal = getVal("destinatario_codigo_postal");
+      const destinatarioPais = getVal("destinatario_pais");
       const transportista = getVal("transportista");
       const matriculaVehiculo = getVal("matricula");
       const referenciaAlbaran = getVal("referencia_albaran");
@@ -150,8 +156,6 @@ export const previewDecasCsv = (
       if (!destinatario) missingValues.push("destinatario");
       if (!ciudadDestino) missingValues.push("ciudad_destino");
       if (!mercancia) missingValues.push("mercancia");
-      if (!bultos) missingValues.push("bultos");
-      if (!pesoKgRaw) missingValues.push("peso_kg");
 
       if (missingValues.length > 0) {
         return {
@@ -166,14 +170,14 @@ export const previewDecasCsv = (
           reason: "La fecha debe tener formato AAAA-MM-DD y ser válida.",
         };
       }
-      if (!isValidPackageCount(bultos)) {
+      if (bultos && !isValidPackageCount(bultos)) {
         return {
           rowNumber: index + 2,
           reason: "bultos debe ser un número entero no negativo.",
         };
       }
-      const pesoKg = parseWeight(pesoKgRaw);
-      if (pesoKg === null) {
+      const pesoKg = pesoKgRaw ? parseWeight(pesoKgRaw) : undefined;
+      if (pesoKgRaw && pesoKg === null) {
         return {
           rowNumber: index + 2,
           reason: "peso_kg debe ser un número no negativo.",
@@ -189,8 +193,10 @@ export const previewDecasCsv = (
         destinatario,
         direccionDestino,
         ciudadDestino,
+        destinatarioCodigoPostal: destinatarioCodigoPostal || undefined,
+        destinatarioPais: destinatarioPais || undefined,
         mercancia,
-        numeroBultos: bultos,
+        numeroBultos: bultos || undefined,
         pesoKg,
         referenciaAlbaran,
         matriculaVehiculo,
@@ -214,4 +220,4 @@ export const previewDecasCsv = (
 };
 
 export const decaTemplateCsv = () =>
-  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Calle Mayor 12;Valencia;Mercancía de ejemplo;12;1250.5;Transportes Rápidos S.A.;1234-BBB;ALB-2026-001`;
+  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Calle Mayor 12;Valencia;Mercancía de ejemplo;12;1250.5;Transportes Rápidos S.A.;1234-BBB;ALB-2026-001;;`;

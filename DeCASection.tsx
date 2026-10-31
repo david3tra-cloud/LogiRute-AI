@@ -98,6 +98,17 @@ import {
   type DecaRow,
   type DecaUpdate,
 } from "./decaSupabaseService";
+import {
+  retryPendingDecaDeletes,
+  deleteDecaDocument,
+  processCompletedInFlightInsert,
+  type DecaDeletionDeps,
+} from "./decaDeletionService";
+import {
+  EmissionReservationGate,
+  prepareAndReserveDeCA,
+} from "./decaEmissionPreparation";
+import { validateDeCAForEmission } from "./decaEmissionValidation";
 
 const STORAGE_KEY = "transport_app_decas";
 
@@ -184,6 +195,8 @@ type DeCAForm = Pick<
   | "cargadorNif"
   | "destinatario"
   | "destinatarioNif"
+  | "destinatarioCodigoPostal"
+  | "destinatarioPais"
   | "direccionDestino"
   | "ciudadDestino"
   | "numeroBultos"
@@ -224,6 +237,8 @@ type BulkDeCACommon = Pick<
 type BulkDeCALine = {
   id: string;
   destinatario: string;
+  destinatarioCodigoPostal: string;
+  destinatarioPais: string;
   direccionDestino: string;
   ciudadDestino: string;
   mercancia: string;
@@ -1100,37 +1115,23 @@ const addRemoteDecaReference = (
 const enqueuePendingDecaDelete = (reference: RemoteDecaReference): boolean =>
   addRemoteDecaReference(DECA_PENDING_DELETES_STORAGE_KEY, reference);
 
-const removePendingDecaDelete = (reference: RemoteDecaReference) => {
-  const pending = readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY);
-  writeRemoteDecaReferences(
+const removePendingDecaDelete = (
+  reference: RemoteDecaReference,
+): boolean => {
+  const pending = readRemoteDecaReferences(
+    DECA_PENDING_DELETES_STORAGE_KEY,
+  );
+
+  return writeRemoteDecaReferences(
     DECA_PENDING_DELETES_STORAGE_KEY,
     pending.filter(
-      (item) => item.id !== reference.id || item.userId !== reference.userId,
+      (item) =>
+        item.id !== reference.id ||
+        item.userId !== reference.userId,
     ),
   );
 };
 
-const retryPendingDecaDeletes = async (userId: string): Promise<string[]> => {
-  const completedIds: string[] = [];
-
-  for (const reference of readRemoteDecaReferences(
-    DECA_PENDING_DELETES_STORAGE_KEY,
-  )) {
-    if (reference.userId !== userId) continue;
-
-    try {
-      const result = await deleteUserDeca(reference.id);
-      if (result.deleted || reference.userId === userId) {
-        removePendingDecaDelete(reference);
-        completedIds.push(reference.id);
-      }
-    } catch {
-      // El tombstone permanece en la cola para otro intento.
-    }
-  }
-
-  return completedIds;
-};
 
 type PendingTransportistaDelete = { id: string; token: number };
 type QueueResult<T> = { ok: true; value: T } | { ok: false; error: Error };
@@ -1296,6 +1297,8 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   cargadorId: "",
   cargadorNif: "",
   destinatarioNif: "",
+  destinatarioCodigoPostal: "",
+  destinatarioPais: "",
   transportista: defaultCarrier?.nombre ?? "",
   transportistaNif: defaultCarrier?.nif ?? "",
   transportistaDireccion: defaultCarrier?.direccion ?? "",
@@ -1526,6 +1529,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         globalThis.crypto?.randomUUID?.() ??
         `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       destinatario: "",
+      destinatarioCodigoPostal: "",
+      destinatarioPais: "",
       direccionDestino: "",
       ciudadDestino: "",
       mercancia: "",
@@ -1555,11 +1560,49 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   );
   const [view, setView] = useState<SectionView>("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const emissionReservationGateRef = useRef(new EmissionReservationGate());
+  const [selectedDecaIds, setSelectedDecaIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [bulkSummary, setBulkSummary] = useState<{
+    confirmados: number;
+    pendientesReintento: number;
+    enVueloMarcados: number;
+    rechazadosFallidos: number;
+    noProcesados: number;
+    total: number;
+    errores: Record<string, string>;
+    interrupted: boolean;
+  } | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const bulkLoteUserRef = useRef<string | null>(null);
   const [form, setForm] = useState<DeCAForm>(() =>
     createEmptyForm(
       initialTransportistaLoad.items.find((item) => item.esPredeterminado),
     ),
   );
+
+  // Limpia la selección y el resumen del lote cuando cambia la sesión de usuario.
+  // El finally de un lote antiguo no desbloquea ni altera el lote nuevo porque
+  // comprueba la generación antes de tocar bulkLockRef.
+  const prevSessionUserRef = useRef(sessionUserId);
+  useEffect(() => {
+    if (prevSessionUserRef.current !== sessionUserId) {
+      emissionReservationGateRef.current.invalidate();
+      setEmissionAction("idle");
+      setEmissionMessage("");
+      bulkGenerationRef.current += 1;
+      setSelectedDecaIds(new Set());
+      setBulkSummary(null);
+      setBulkDeleting(false);
+      bulkLockRef.current = false;
+      bulkLoteUserRef.current = null;
+    }
+    prevSessionUserRef.current = sessionUserId;
+    sessionUserIdRef.current = sessionUserId;
+  }, [sessionUserId]);
   const [photoError, setPhotoError] = useState("");
   const [ocrError, setOcrError] = useState("");
   const [ocrNotice, setOcrNotice] = useState("");
@@ -1603,6 +1646,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   );
   const transportistaRemoteLoadVersionRef = useRef(0);
   const editedFieldsRef = useRef(new Set<keyof DeCAForm>());
+  const manuallyEditedFieldsRef = useRef(new Set<keyof DeCAForm>());
   const remoteDecaIdsRef = useRef(new Set<string>());
   const remoteDecaUserIdRef = useRef<string | null>(null);
   const pendingDecaInsertIdsRef = useRef(new Set<string>());
@@ -1610,6 +1654,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const newDecaInsertInProgressRef = useRef(false);
   const remoteEditInProgressRef = useRef(false);
   const skipNextDecaStorageWriteRef = useRef(false);
+  const bulkLockRef = useRef(false);
+  const manuallyEditedBulkRecipientCountriesRef = useRef(new Set<string>());
+  const bulkGenerationRef = useRef(0);
+  const sessionUserIdRef = useRef(sessionUserId);
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
   formRef.current = form;
@@ -1756,6 +1804,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      emissionReservationGateRef.current.invalidate();
+      bulkGenerationRef.current += 1;
       const worker = ocrWorkerRef.current;
       ocrWorkerRef.current = null;
       if (worker) void worker.terminate().catch(() => undefined);
@@ -1763,6 +1813,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   }, []);
 
   useEffect(() => {
+    emissionReservationGateRef.current.invalidate();
     setDocumentAction("idle");
     setDocumentMessage("");
     setEmissionAction("idle");
@@ -1805,7 +1856,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             .map((item) => item.id),
         );
 
-        await retryPendingDecaDeletes(userId);
+        await retryPendingDecaDeletes(userId, makeDecaDeletionDeps());
         const rows = await listUserDecas();
         if (!isCurrent) return;
 
@@ -1887,7 +1938,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           return merged;
         });
 
-        const completedIds = await retryPendingDecaDeletes(userId);
+        const { completedIds } = await retryPendingDecaDeletes(userId, makeDecaDeletionDeps());
         if (completedIds.length > 0) {
           const completed = new Set(completedIds);
           setDecas((current) =>
@@ -3202,48 +3253,222 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const reserveSelectedDeCAEmission = async () => {
     if (!selectedDeCA || !isSelectedDeCADraft || emissionAction === "reserving")
       return;
-    if (
-      !window.confirm(
-        "¿Reservar la emisión de este DeCA? El documento pasará a EMITIENDO; después tendrás que finalizar la emisión para subir el PDF oficial.",
-      )
-    )
-      return;
+
+    const decaId = selectedDeCA.id;
+    const lease = emissionReservationGateRef.current.acquire(decaId);
+    if (!lease) return;
+
+    const expectedUserId = sessionUserIdRef.current;
+    let handled = false;
+    const isCurrentOperation = () =>
+      Boolean(
+        expectedUserId &&
+          mountedRef.current &&
+          emissionReservationGateRef.current.isCurrent(lease) &&
+          selectedIdRef.current === decaId &&
+          sessionUserIdRef.current === expectedUserId,
+      );
 
     setEmissionAction("reserving");
     setEmissionMessage("");
     try {
-      const reserved = await reserveUserDecaEmission(selectedDeCA.id);
-      if (reserved) {
-        integrateRemoteDeCA(reserved);
+      if (!expectedUserId) {
+        setEmissionAction("error");
+        setEmissionMessage(
+          "No se pudo verificar la sesión actual. No se reservó el DeCA.",
+        );
+        handled = true;
+        return;
+      }
+      if (
+        !window.confirm(
+          "¿Reservar la emisión de este DeCA? El documento pasará a EMITIENDO; después tendrás que finalizar la emisión para subir el PDF oficial.",
+        )
+      ) {
+        setEmissionAction("idle");
+        handled = true;
+        return;
+      }
+
+      const result = await prepareAndReserveDeCA({
+        decaId,
+        expectedUserId,
+        lease,
+        gate: emissionReservationGateRef.current,
+        getCurrentUserId,
+        readRemoteDeCA: getUserDecaById,
+        isOwnedByUser: (row, userId) => row.user_id === userId,
+        isDraft: (row) => row.estado === "BORRADOR",
+        sameDraft: (before, after) =>
+          before.id === after.id &&
+          before.user_id === after.user_id &&
+          before.estado === after.estado &&
+          before.deleted_at === after.deleted_at &&
+          before.updated_at === after.updated_at &&
+          before.empresa_habitual_id === after.empresa_habitual_id &&
+          before.cargador_nif === after.cargador_nif &&
+          before.cargador === after.cargador,
+        resolveCarrier: (row) => {
+          const deca = mapSupabaseDecaToLocal(row);
+          return loadUserEmpresaHabitualForDeCA(
+            deca.cargadorId,
+            deca.cargadorNif,
+            deca.cargador,
+          );
+        },
+        resolveRecipient: (row) => {
+          const deca = mapSupabaseDecaToLocal(row);
+          return loadUserEmpresaHabitualForDeCA(
+            undefined,
+            deca.destinatarioNif,
+            deca.destinatario,
+          );
+        },
+        validate: (row, carrier, recipient) =>
+          validateDeCAForEmission(
+            mapSupabaseDecaToLocal(row),
+            carrier,
+            recipient,
+          ),
+        reserve: reserveUserDecaEmission,
+        isCurrent: (activeLease, userId) =>
+          mountedRef.current &&
+          emissionReservationGateRef.current.isCurrent(activeLease) &&
+          selectedIdRef.current === activeLease.decaId &&
+          sessionUserIdRef.current === userId,
+      });
+
+      if (result.kind === "stale" || !isCurrentOperation()) return;
+
+      if (result.kind === "reserved") {
+        integrateRemoteDeCA(result.row);
         setEmissionAction("success");
         setEmissionMessage(
           "La reserva se realizó correctamente. El estado del documento ahora es EMITIENDO.",
         );
+        handled = true;
         return;
       }
 
-      const rows = await listUserDecas();
-      const currentRow = rows.find((row) => row.id === selectedDeCA.id);
-      if (currentRow?.deleted_at === null) {
-        integrateRemoteDeCA(currentRow);
-      } else if (currentRow || remoteDecaIdsRef.current.has(selectedDeCA.id)) {
-        setDecas((current) =>
-          current.filter((deca) => deca.id !== selectedDeCA.id),
+      if (result.kind === "remote_state") {
+        integrateRemoteDeCA(result.row);
+        setEmissionAction(
+          result.row.estado === "BORRADOR" ? "error" : "success",
         );
+        setEmissionMessage(
+          result.row.estado === "EMITIENDO"
+            ? "El estado remoto ya es EMITIENDO. No se creó otra reserva; continúa con Finalizar emisión."
+            : result.row.estado === "EMITIDO"
+              ? "El estado remoto confirma que el DeCA ya está EMITIDO."
+              : "El documento sigue en BORRADOR en remoto y no se reservó.",
+        );
+        handled = true;
+        return;
       }
+
+      if (result.kind === "document_changed") {
+        integrateRemoteDeCA(result.row);
+        setEmissionAction("error");
+        setEmissionMessage(
+          "El documento cambió mientras se verificaba. Revisa los datos y vuelve a intentarlo; no se reservó.",
+        );
+        handled = true;
+        return;
+      }
+
+      if (result.kind === "remote_missing") {
+        setEmissionAction("error");
+        setEmissionMessage(
+          "No se encontró un DeCA activo en remoto. No se realizó una reserva.",
+        );
+        handled = true;
+        return;
+      }
+
+      if (result.kind === "carrier_missing") {
+        setEmissionAction("error");
+        setEmissionMessage(
+          "No se encontró un perfil de cargador. Selecciona o completa el cargador en Empresas habituales y vuelve a intentarlo. El DeCA sigue en borrador.",
+        );
+        handled = true;
+        return;
+      }
+
+      if (result.kind === "validation_failed") {
+        setEmissionAction("error");
+        setEmissionMessage(
+          `Completa o corrige estos datos antes de emitir: ${result.errors
+            .map((error) => error.label)
+            .join(", ")}. El DeCA sigue en borrador y no se reservó.`,
+        );
+        handled = true;
+        return;
+      }
+
+      if (result.kind === "preflight_error") {
+        setEmissionAction("error");
+        setEmissionMessage(
+          result.stage === "carrier"
+            ? "No se pudo verificar el cargador en Empresas habituales. No se reservó el DeCA."
+            : result.stage === "recipient"
+              ? "No se pudo verificar el destinatario. No se reservó el DeCA."
+              : result.stage === "remote"
+                ? "No se pudo comprobar el estado remoto del DeCA. No se hizo una reserva."
+                : "No se pudo verificar la sesión actual. No se reservó el DeCA.",
+        );
+        handled = true;
+        return;
+      }
+
+      if (result.kind === "reservation_reconciled") {
+        if (result.row) {
+          integrateRemoteDeCA(result.row);
+          setEmissionAction(
+            result.row.estado === "BORRADOR" ? "error" : "success",
+          );
+          setEmissionMessage(
+            result.row.estado === "BORRADOR"
+              ? "La consulta remota muestra el DeCA en BORRADOR; no se observó la reserva aplicada. No hubo reintento automático."
+              : result.row.estado === "EMITIENDO"
+                ? "La consulta remota confirma EMITIENDO. No se repitió la reserva; continúa con Finalizar emisión."
+                : "La consulta remota confirma que el DeCA está EMITIDO.",
+          );
+        } else {
+          setEmissionAction("error");
+          setEmissionMessage(
+            "La conciliación no encontró un DeCA activo. No se puede confirmar el resultado de la reserva.",
+          );
+        }
+        handled = true;
+        return;
+      }
+
       setEmissionAction("error");
       setEmissionMessage(
-        "No se pudo reservar el DeCA. Puede que ya se haya emitido o reservado desde otro dispositivo; se ha consultado la lista remota.",
+        "No se pudo confirmar el resultado de la reserva. No se repitió automáticamente; antes de un nuevo intento se comprobará de nuevo el estado remoto.",
       );
+      handled = true;
     } catch (error) {
-      console.error("No se pudo reservar la emisión del DeCA.", error);
+      if (!isCurrentOperation()) return;
+      console.error("No se pudo preparar o reservar la emisión del DeCA.", error);
       setEmissionAction("error");
       setEmissionMessage(
-        `No se pudo reservar la emisión del DeCA: ${error instanceof Error ? error.message : String(error)}`,
+        "No se pudo completar la comprobación. El estado remoto debe verificarse antes de intentar de nuevo.",
       );
+      handled = true;
+    } finally {
+      const released = emissionReservationGateRef.current.release(lease);
+      if (
+        released &&
+        !handled &&
+        mountedRef.current &&
+        selectedIdRef.current === decaId &&
+        sessionUserIdRef.current === expectedUserId
+      ) {
+        setEmissionAction("idle");
+      }
     }
   };
-
   const finalizeSelectedDeCAEmission = async () => {
     if (
       !selectedDeCA ||
@@ -3629,12 +3854,15 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       next.cargadorNif = "";
     }
     if (field === "destinatario") next.destinatarioNif = "";
+    manuallyEditedFieldsRef.current.add(field);
     formRef.current = next;
     setForm(next);
     if (
       field === "destinatario" ||
       field === "direccionDestino" ||
-      field === "ciudadDestino"
+      field === "ciudadDestino" ||
+      field === "destinatarioCodigoPostal" ||
+      field === "destinatarioPais"
     )
       setDestinationLoadedNotice(false);
     if (field === "cargador") setLoaderLoadedNotice(false);
@@ -3670,10 +3898,16 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       ...formRef.current,
       destinatario: company.nombre,
       destinatarioNif: company.nif,
+      destinatarioCodigoPostal: company.codigoPostal,
+      destinatarioPais: manuallyEditedFieldsRef.current.has("destinatarioPais")
+        ? formRef.current.destinatarioPais
+        : company.pais,
       direccionDestino: company.direccion,
       ciudadDestino: company.ciudad,
     };
     editedFieldsRef.current.add("destinatario");
+    editedFieldsRef.current.add("destinatarioCodigoPostal");
+    editedFieldsRef.current.add("destinatarioPais");
     editedFieldsRef.current.add("direccionDestino");
     editedFieldsRef.current.add("ciudadDestino");
     formRef.current = next;
@@ -3728,7 +3962,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       transportistaCiudad: item.ciudad,
       transportistaCodigoPostal: item.codigoPostal,
       transportistaProvincia: item.provincia,
-      transportistaPais: item.pais,
+      transportistaPais: manuallyEditedFieldsRef.current.has("transportistaPais")
+        ? formRef.current.transportistaPais
+        : item.pais,
       transportistaTelefono: item.telefono,
       transportistaEmail: item.email,
       transportistaNotas: item.notas,
@@ -4370,6 +4606,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               cargador_nif: savedForm.cargadorNif?.trim() || null,
               destinatario: savedForm.destinatario.trim() || null,
               destinatario_nif: savedForm.destinatarioNif?.trim() || null,
+              destinatario_codigo_postal:
+                savedForm.destinatarioCodigoPostal?.trim() || null,
+              destinatario_pais: savedForm.destinatarioPais?.trim() || null,
               transportista: savedForm.transportista.trim() || null,
               transportista_nif: savedForm.transportistaNif?.trim() || null,
               transportista_direccion:
@@ -4456,13 +4695,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             remoteDecaIdsRef.current.add(inserted.id);
           }
 
-          if (deletedPendingInsertIdsRef.current.delete(newDeCA.id)) {
-            if (enqueuePendingDecaDelete(reference)) {
-              await retryPendingDecaDeletes(inserted.user_id);
-            } else {
-              await deleteUserDeca(inserted.id);
-            }
-          } else if (mountedRef.current) {
+          const inFlightResult = await processCompletedInFlightInsert(
+            reference,
+            deletedPendingInsertIdsRef.current,
+            makeDecaDeletionDeps(),
+          );
+          if (!inFlightResult.wasMarkedForDeletion && mountedRef.current) {
             setDecas((current) =>
               current.map((deca) =>
                 deca.id === newDeCA.id ? { ...deca, id: inserted.id } : deca,
@@ -4497,43 +4735,217 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setView("list");
   };
 
-  const handleDelete = () => {
-    if (
-      remoteLoading ||
-      !selectedDeCA ||
-      !window.confirm("¿Eliminar este borrador DeCA?")
-    )
-      return;
-
-    const id = selectedDeCA.id;
-    const userId = remoteDecaUserIdRef.current;
-    const reference = readRemoteDecaReferences(
-      DECA_REMOTE_IDS_STORAGE_KEY,
-    ).find((item) => item.id === id && item.userId === userId);
-
-    if (reference && !enqueuePendingDecaDelete(reference)) {
-      alert(
-        "No se pudo guardar la baja pendiente; el DeCA no se ha eliminado.",
-      );
-      return;
-    }
-
-    if (!reference && pendingDecaInsertIdsRef.current.has(id)) {
+  const makeDecaDeletionDeps = (): DecaDeletionDeps => ({
+    deleteRemoteDeca: deleteUserDeca,
+    getCurrentUserId,
+    findRemoteReference: (id, userId) =>
+      readRemoteDecaReferences(DECA_REMOTE_IDS_STORAGE_KEY).find(
+        (item) => item.id === id && item.userId === userId,
+      ),
+    readPendingDeletes: () =>
+      readRemoteDecaReferences(DECA_PENDING_DELETES_STORAGE_KEY),
+    enqueuePendingDelete: enqueuePendingDecaDelete,
+    removePendingDelete: removePendingDecaDelete,
+    isInsertPending: (id) => pendingDecaInsertIdsRef.current.has(id),
+    markDeletedPendingInsert: (id) => {
       deletedPendingInsertIdsRef.current.add(id);
+    },
+  });
+
+  const handleDelete = async () => {
+    if (remoteLoading || !selectedDeCA || bulkLockRef.current) return;
+
+    const deca = selectedDeCA;
+    if (deca.estado === "EMITIENDO") {
+      alert("No se puede eliminar un DeCA en proceso de emisión.");
+      return;
     }
 
-    setDecas((current) => current.filter((deca) => deca.id !== id));
-    setSelectedId(null);
-    setView("list");
+    if (!window.confirm("¿Eliminar este DeCA?")) return;
 
-    if (reference) {
-      void getCurrentUserId()
-        .then((currentUserId) =>
-          currentUserId === reference.userId
-            ? retryPendingDecaDeletes(reference.userId)
-            : undefined,
-        )
-        .catch(() => undefined);
+    const result = await deleteDecaDocument(deca, makeDecaDeletionDeps());
+
+    if (result.status === "confirmed" || result.status === "in_flight_insert_marked") {
+      setDecas((current) => current.filter((d) => d.id !== deca.id));
+      setSelectedId(null);
+      setView("list");
+    } else if (result.status === "unconfirmed") {
+      if (result.queuedForRetry) {
+        setDecas((current) => current.filter((d) => d.id !== deca.id));
+        setSelectedId(null);
+        setView("list");
+        alert(
+          "El DeCA se ocultó de la lista y se reintentará automáticamente." +
+            (result.errorMessage ? "\n" + result.errorMessage : ""),
+        );
+      } else {
+        alert("No se pudo eliminar el DeCA: " + result.errorMessage);
+      }
+    } else {
+      alert("No se pudo eliminar el DeCA: " + (result.errorMessage ?? "estado no reconocido"));
+    }
+  };
+
+  const getValidSelection = (): DeCA[] => {
+    const decaMap = new Map(decas.map((d) => [d.id, d]));
+    return [...selectedDecaIds]
+      .map((id) => decaMap.get(id))
+      .filter(
+        (deca): deca is DeCA => Boolean(deca) && deca.estado !== "EMITIENDO",
+      );
+  };
+
+  const handleToggleDecaSelection = (id: string, checked: boolean) => {
+    if (bulkLockRef.current) return;
+    setSelectedDecaIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    if (bulkLockRef.current) return;
+    const elegibles = decas.filter((d) => d.estado !== "EMITIENDO");
+    const elegibleIds = new Set(elegibles.map((d) => d.id));
+    const allSelected = elegibles.every((d) => selectedDecaIds.has(d.id));
+    setSelectedDecaIds(allSelected ? new Set() : elegibleIds);
+  };
+
+  const isBatchValid = (loteId: number, userId: string): boolean => {
+    return (
+      mountedRef.current &&
+      bulkGenerationRef.current === loteId &&
+      bulkLockRef.current &&
+      bulkLoteUserRef.current === userId &&
+      sessionUserIdRef.current === userId
+    );
+  };
+
+  const handleBulkDelete = async () => {
+    if (bulkLockRef.current) return;
+
+    const validos = getValidSelection();
+    if (validos.length === 0) {
+      setBulkSummary(null);
+      return;
+    }
+
+    const loteId = ++bulkGenerationRef.current;
+    bulkLockRef.current = true;
+    bulkLoteUserRef.current = null;
+    setBulkDeleting(true);
+
+    try {
+      const currentUserId = await getCurrentUserId();
+      if (!currentUserId) {
+        if (
+          mountedRef.current &&
+          bulkGenerationRef.current === loteId &&
+          sessionUserIdRef.current === null
+        ) {
+          alert("No hay una sesion activa de usuario.");
+        }
+        return;
+      }
+
+      if (
+        !mountedRef.current ||
+        bulkGenerationRef.current !== loteId ||
+        !bulkLockRef.current ||
+        sessionUserIdRef.current !== currentUserId
+      ) {
+        return;
+      }
+
+      bulkLoteUserRef.current = currentUserId;
+      if (!isBatchValid(loteId, currentUserId)) return;
+      if (
+        !window.confirm(`¿Eliminar ${validos.length} DeCA(s) seleccionado(s)?`)
+      ) {
+        return;
+      }
+
+      const resultados = {
+        confirmados: 0,
+        pendientesReintento: 0,
+        enVueloMarcados: 0,
+        rechazadosFallidos: 0,
+        noProcesados: 0,
+        total: validos.length,
+        errores: {} as Record<string, string>,
+        interrupted: false,
+      };
+
+      // Procesamiento secuencial: una operación a la vez.
+      for (const deca of validos) {
+        const uid = await getCurrentUserId();
+        if (!isBatchValid(loteId, currentUserId) || uid !== currentUserId) {
+          resultados.interrupted = true;
+          break;
+        }
+
+        let res;
+        try {
+          res = await deleteDecaDocument(deca, makeDecaDeletionDeps());
+        } catch (error) {
+          resultados.rechazadosFallidos += 1;
+          resultados.errores[deca.id] =
+            error instanceof Error ? error.message : String(error);
+          continue;
+        }
+
+        if (!isBatchValid(loteId, currentUserId)) {
+          resultados.interrupted = true;
+          break;
+        }
+
+        if (res.status === "confirmed" || res.status === "in_flight_insert_marked") {
+          setDecas((current) => current.filter((d) => d.id !== deca.id));
+          if (res.status === "confirmed") {
+            resultados.confirmados += 1;
+          } else {
+            resultados.enVueloMarcados += 1;
+          }
+        } else if (res.status === "unconfirmed" && res.queuedForRetry) {
+          setDecas((current) => current.filter((d) => d.id !== deca.id));
+          resultados.pendientesReintento += 1;
+        } else {
+          // rejected o unconfirmed sin retry: mantener visible en la lista.
+          resultados.rechazadosFallidos += 1;
+          resultados.errores[deca.id] =
+            res.errorMessage ?? "estado no reconocido";
+        }
+      }
+
+      // Calcular no procesados (interrumpidos) sin contarlos como borrados ni fallos remotos.
+      resultados.noProcesados =
+        resultados.total -
+        (resultados.confirmados +
+          resultados.pendientesReintento +
+          resultados.enVueloMarcados +
+          resultados.rechazadosFallidos);
+
+      // Solo publicar si el lote sigue válido para esta sesión.
+      if (
+        mountedRef.current &&
+        isBatchValid(loteId, currentUserId) &&
+        bulkGenerationRef.current === loteId &&
+        bulkLoteUserRef.current === currentUserId &&
+        !resultados.interrupted
+      ) {
+        setSelectedDecaIds(new Set());
+        setBulkSummary(resultados);
+      }
+    } finally {
+      // Liberar el bloqueo solo si es el mismo lote; un finally antiguo no
+      // desbloquea ni altera un lote nuevo.
+      if (bulkGenerationRef.current === loteId) {
+        bulkLockRef.current = false;
+        bulkLoteUserRef.current = null;
+        setBulkDeleting(false);
+      }
     }
   };
 
@@ -4557,6 +4969,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setAppliedSuggestions(null);
     defaultDateRef.current = getToday();
     editedFieldsRef.current.clear();
+    manuallyEditedFieldsRef.current.clear();
     setView("form");
   };
 
@@ -4621,6 +5034,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       transportistaNotas: selectedDeCA.transportistaNotas ?? "",
       destinatario: selectedDeCA.destinatario ?? "",
       destinatarioNif: selectedDeCA.destinatarioNif ?? "",
+      destinatarioCodigoPostal:
+        selectedDeCA.destinatarioCodigoPostal ?? "",
+      destinatarioPais: selectedDeCA.destinatarioPais ?? "",
       direccionDestino: selectedDeCA.direccionDestino ?? "",
       ciudadDestino: selectedDeCA.ciudadDestino ?? "",
       mercancia: selectedDeCA.mercancia ?? "",
@@ -4642,6 +5058,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setOcrError("");
     setDetectedText(null);
     editedFieldsRef.current.clear();
+    manuallyEditedFieldsRef.current.clear();
     setView("form");
   };
 
@@ -4765,6 +5182,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           ? {
               ...line,
               destinatario: company.nombre,
+              destinatarioCodigoPostal: company.codigoPostal,
+              destinatarioPais:
+                manuallyEditedBulkRecipientCountriesRef.current.has(lineId)
+                  ? line.destinatarioPais
+                  : company.pais,
               direccionDestino: company.direccion,
               ciudadDestino: company.ciudad,
             }
@@ -4798,6 +5220,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
   const openBulkPanel = () => {
     if (!hasSavedBulkLines) {
+      manuallyEditedBulkRecipientCountriesRef.current.clear();
       const defaultTransportista = transportistas.find(
         (item) => item.esPredeterminado,
       );
@@ -4822,6 +5245,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             globalThis.crypto?.randomUUID?.() ??
             `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           destinatario: "",
+          destinatarioCodigoPostal: "",
+          destinatarioPais: "",
           direccionDestino: "",
           ciudadDestino: "",
           mercancia: "",
@@ -4883,6 +5308,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           transportistaEmail: bulkCommon.transportistaEmail,
           transportistaNotas: bulkCommon.transportistaNotas,
           destinatario: line.destinatario.trim(),
+          destinatarioCodigoPostal: line.destinatarioCodigoPostal.trim() || undefined,
+          destinatarioPais: line.destinatarioPais.trim() || undefined,
           direccionDestino: line.direccionDestino,
           ciudadDestino: line.ciudadDestino.trim(),
           mercancia: line.mercancia.trim(),
@@ -5671,6 +6098,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       line.destinatario,
                     );
                     const updateLine = (changes: Partial<BulkDeCALine>) => {
+                      if (Object.hasOwn(changes, "destinatarioPais")) {
+                        manuallyEditedBulkRecipientCountriesRef.current.add(line.id);
+                      }
                       setBulkLines((current) =>
                         current.map((item) =>
                           item.id === line.id ? { ...item, ...changes } : item,
@@ -5810,6 +6240,38 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                               {lineErrors.ciudadDestino}
                             </p>
                           )}
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-postal-code`}
+                          >
+                            Código postal del destinatario (opcional)
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-postal-code`}
+                            className={inputClass}
+                            value={line.destinatarioCodigoPostal}
+                            onChange={(event) =>
+                              updateLine({ destinatarioCodigoPostal: event.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <label
+                            className={labelClass}
+                            htmlFor={`bulk-deca-${line.id}-country`}
+                          >
+                            País del destinatario (opcional)
+                          </label>
+                          <input
+                            id={`bulk-deca-${line.id}-country`}
+                            className={inputClass}
+                            value={line.destinatarioPais}
+                            onChange={(event) =>
+                              updateLine({ destinatarioPais: event.target.value })
+                            }
+                          />
                         </div>
                         <div className="min-w-0">
                           <label
@@ -5956,6 +6418,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                             globalThis.crypto?.randomUUID?.() ??
                             `${Date.now()}-${Math.random().toString(36).slice(2)}`,
                           destinatario: "",
+                          destinatarioCodigoPostal: "",
+                          destinatarioPais: "",
                           direccionDestino: "",
                           ciudadDestino: "",
                           mercancia: "",
@@ -6017,8 +6481,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
                     El CSV debe incluir fecha (AAAA-MM-DD), cargador,
-                    destinatario, ciudad_destino, mercancia, bultos y peso_kg.
+                    destinatario, ciudad_destino y mercancia. bultos y peso_kg
+                    son opcionales.
                     Opcionalmente puedes incluir direccion_destino,
+                    destinatario_codigo_postal, destinatario_pais,
                     transportista, matricula y referencia_albaran. Las filas
                     importadas se crearán como borradores.
                   </p>
@@ -6181,6 +6647,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       deca.estado === "EMITIDO" &&
                       isValidHttpsPdfUrl(deca.pdfPublicUrl)
                     }
+                    isSelected={selectedDecaIds.has(deca.id)}
+                    selectable={deca.estado !== "EMITIENDO" && !bulkDeleting}
+                    onToggle={handleToggleDecaSelection}
                     onOpen={() => {
                       setSelectedId(deca.id);
                       setView("detail");
@@ -6190,7 +6659,94 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 ))}
               </div>
             )}
-          </>
+          <div className="mb-4 space-y-2 rounded-lg border border-red-100 bg-red-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSelectAll}
+                  disabled={bulkDeleting}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {decas
+                    .filter((d) => d.estado !== "EMITIENDO")
+                    .every((d) => selectedDecaIds.has(d.id))
+                    ? "Deseleccionar todo"
+                    : "Seleccionar todo"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDecaIds(new Set())}
+                  disabled={bulkDeleting}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Limpiar selección
+                </button>
+                <span className="text-xs text-slate-500">
+                  {getValidSelection().length} seleccionado(s)
+                </span>
+              </div>
+              {getValidSelection().length > 0 && (
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={handleBulkDelete}
+                  className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Trash2 size={16} /> Eliminar seleccionados ({getValidSelection().length})
+                </button>
+              )}
+            </div>
+            {bulkSummary && (
+              <div className="mt-3 space-y-1 text-sm">
+                <div className="flex justify-between text-slate-700">
+                  <span>Borrados confirmados:</span>
+                  <span className="font-bold text-green-700">
+                    {bulkSummary.confirmados}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>Pendientes de reintento:</span>
+                  <span className="font-bold text-amber-700">
+                    {bulkSummary.pendientesReintento}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>En vuelo marcados para borrar:</span>
+                  <span className="font-bold text-blue-700">
+                    {bulkSummary.enVueloMarcados}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>Rechazados / fallidos:</span>
+                  <span className="font-bold text-red-700">
+                    {bulkSummary.rechazadosFallidos}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>No procesados:</span>
+                  <span className="font-bold text-slate-700">
+                    {bulkSummary.noProcesados}
+                  </span>
+                </div>
+                {Object.keys(bulkSummary.errores).length > 0 && (
+                  <div className="mt-2 text-xs text-red-600">
+                    <strong>Errores:</strong>
+                    <ul className="list-disc list-inside mt-1">
+                      {Object.entries(bulkSummary.errores).map(
+                        ([id, msg]) => (
+                          <li key={id}>
+                            {id}: {msg}
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </>
         )}
 
         {view === "form" && (
@@ -6603,6 +7159,38 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     value={form.ciudadDestino}
                     onChange={(event) =>
                       updateField("ciudadDestino", event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    className={labelClass}
+                    htmlFor="deca-destinatario-codigo-postal"
+                  >
+                    Código postal del destinatario
+                  </label>
+                  <input
+                    id="deca-destinatario-codigo-postal"
+                    className={inputClass}
+                    value={form.destinatarioCodigoPostal ?? ""}
+                    onChange={(event) =>
+                      updateField("destinatarioCodigoPostal", event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    className={labelClass}
+                    htmlFor="deca-destinatario-pais"
+                  >
+                    País del destinatario
+                  </label>
+                  <input
+                    id="deca-destinatario-pais"
+                    className={inputClass}
+                    value={form.destinatarioPais ?? ""}
+                    onChange={(event) =>
+                      updateField("destinatarioPais", event.target.value)
                     }
                   />
                 </div>
@@ -7056,6 +7644,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 </span>
               </div>
               <dl className="grid gap-x-6 sm:grid-cols-2">
+                <div className="border-b border-slate-100 py-3">
+                  <dt className="text-xs font-bold text-slate-500">
+                    ID del documento
+                  </dt>
+                  <dd className="select-text break-all font-mono text-sm text-slate-700">
+                    {selectedDeCA.id}
+                  </dd>
+                </div>
                 {[
                   ["Cargador", selectedDeCA.cargador],
                   ["Transportista", selectedDeCA.transportista],

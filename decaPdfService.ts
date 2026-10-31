@@ -1,6 +1,7 @@
 import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
 import type { DeCA, EmpresaHabitual } from "./types";
+import { resolveEffectiveRecipientAddress } from "./decaEmissionValidation";
 
 const PAGE_WIDTH = 210;
 const PAGE_HEIGHT = 297;
@@ -133,6 +134,7 @@ const makePdf = async (
         timeStyle: "short",
       });
   const fileName = `DECA-${fileDate(deca.fecha)}-${safeFilePart(deca.destinatario)}.pdf`;
+  const recipientAddress = resolveEffectiveRecipientAddress(deca, destinatario);
   const qrImage = await QRCode.toDataURL(
     overrides?.qrValue ?? createQrSummary(deca, documentoId),
     {
@@ -248,6 +250,7 @@ const makePdf = async (
   writeRow("Dirección", deca.transportistaDireccion);
   writeRow("Código postal", deca.transportistaCodigoPostal);
   writeRow("Ciudad", deca.transportistaCiudad);
+  writeRow("País", deca.transportistaPais);
   writeRow("Teléfono", deca.transportistaTelefono);
   writeRow("Email", deca.transportistaEmail);
 
@@ -261,10 +264,10 @@ const makePdf = async (
   writeSection("DESTINATARIO");
   writeRow("Nombre", deca.destinatario);
   writeRow("NIF", overrides?.destinatarioNif ?? destinatario?.nif);
-  writeRow("Dirección", deca.direccionDestino || destinatario?.direccion);
-  writeRow("Código postal", destinatario?.codigoPostal);
-  writeRow("Ciudad", deca.ciudadDestino || destinatario?.ciudad);
-  writeRow("País", destinatario?.pais);
+  writeRow("Dirección", recipientAddress.direccion);
+  writeRow("Código postal", recipientAddress.codigoPostal);
+  writeRow("Ciudad", recipientAddress.ciudad);
+  writeRow("País", recipientAddress.pais);
   writeRow("Contacto", destinatario?.contacto);
 
   writeSection("OBSERVACIONES");

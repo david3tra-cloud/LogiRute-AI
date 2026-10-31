@@ -13,6 +13,8 @@ export type DecaRow = {
   cargador_nif: string | null;
   destinatario: string | null;
   destinatario_nif: string | null;
+  destinatario_codigo_postal: string | null;
+  destinatario_pais: string | null;
   transportista: string | null;
   transportista_nif: string | null;
   transportista_direccion: string | null;
@@ -83,7 +85,7 @@ export type FinalizeDecaEmissionInput = {
 };
 
 const DECA_COLUMNS =
-  "id,user_id,deleted_at,estado,fecha,empresa_habitual_id,cargador,cargador_nif,destinatario,destinatario_nif,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
+  "id,user_id,deleted_at,estado,fecha,empresa_habitual_id,cargador,cargador_nif,destinatario,destinatario_nif,destinatario_codigo_postal,destinatario_pais,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
 
 const DECA_PDF_BUCKET = "deca-pdf";
 
@@ -158,6 +160,8 @@ const UPDATE_COLUMNS = [
   "cargador_nif",
   "destinatario",
   "destinatario_nif",
+  "destinatario_codigo_postal",
+  "destinatario_pais",
   "transportista",
   "transportista_nif",
   "transportista_direccion",
@@ -304,6 +308,8 @@ export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
     cargador_nif: nullableText(deca.cargadorNif),
     destinatario: nullableText(deca.destinatario),
     destinatario_nif: nullableText(deca.destinatarioNif),
+    destinatario_codigo_postal: nullableText(deca.destinatarioCodigoPostal),
+    destinatario_pais: nullableText(deca.destinatarioPais),
     transportista: nullableText(deca.transportista),
     transportista_nif: nullableText(deca.transportistaNif),
     transportista_direccion: nullableText(deca.transportistaDireccion),
@@ -626,6 +632,8 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
     transportista: row.transportista ?? "",
     destinatario: row.destinatario ?? "",
     destinatarioNif: row.destinatario_nif ?? undefined,
+    destinatarioCodigoPostal: row.destinatario_codigo_postal ?? undefined,
+    destinatarioPais: row.destinatario_pais ?? undefined,
     direccionDestino: row.destino ?? "",
     ciudadDestino: row.ciudad_destino ?? "",
     mercancia: row.mercancia ?? "",

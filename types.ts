@@ -101,6 +101,8 @@ export interface DeCA {
   transportista: string;
   destinatario: string;
   destinatarioNif?: string;
+  destinatarioCodigoPostal?: string;
+  destinatarioPais?: string;
   direccionDestino: string;
   ciudadDestino: string;
   mercancia: string;
@@ -156,6 +158,7 @@ export interface JornadaRegistro {
   resumen: JornadaRegistroResumen;
   deliveries: Delivery[];
   sequence: string[];
+  deletedAt?: string | null;
 }
 
 export type PendingClosureStatus = "ARCHIVING" | "CLEARING_ROUTE" | "COMPLETED";

@@ -11,12 +11,16 @@ import { userStorageKey } from "./destinatariosService";
 
 export const REGISTRO_JORNADAS_STORAGE_KEY = "logiroute_registro_jornadas_v1";
 export const PENDING_CLOSURE_STORAGE_KEY = "logiroute_pending_closure_v1";
+export const DELETED_JORNADAS_STORAGE_KEY = "logiroute_deleted_jornadas_v1";
 
 export const getRegistroStorageKey = (userId?: string): string =>
   userStorageKey(REGISTRO_JORNADAS_STORAGE_KEY, userId);
 
 export const getPendingClosureStorageKey = (userId?: string): string =>
   userStorageKey(PENDING_CLOSURE_STORAGE_KEY, userId);
+
+export const getDeletedJornadasStorageKey = (userId?: string): string =>
+  userStorageKey(DELETED_JORNADAS_STORAGE_KEY, userId);
 
 export const safeGetItem = (key: string): string | null => {
   if (typeof window === "undefined") return null;
@@ -130,7 +134,10 @@ export const isJornadaRegistro = (item: unknown): item is JornadaRegistro => {
     candidate.resumen !== null &&
     typeof candidate.resumen === "object" &&
     Array.isArray(candidate.deliveries) &&
-    Array.isArray(candidate.sequence)
+    Array.isArray(candidate.sequence) &&
+    (!Object.hasOwn(candidate, "deletedAt") ||
+      candidate.deletedAt === null ||
+      typeof candidate.deletedAt === "string")
   );
 };
 
@@ -192,6 +199,55 @@ export const loadRegistroJornadasForUser = (
   userId?: string,
 ): JornadaRegistro[] => {
   return loadRegistroJornadasWithStatus(userId).items;
+};
+
+export const loadDeletedJornadaIdsForUser = (userId?: string): string[] => {
+  if (!userId) return [];
+  const raw = safeGetItem(getDeletedJornadasStorageKey(userId));
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((id) => typeof id === "string")
+      ? [...new Set(parsed)]
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+export const rememberDeletedJornadaForUser = (
+  userId: string,
+  jornadaId: string,
+): boolean => {
+  if (!userId || !jornadaId) return false;
+  try {
+    const ids = new Set(loadDeletedJornadaIdsForUser(userId));
+    ids.add(jornadaId);
+    localStorage.setItem(
+      getDeletedJornadasStorageKey(userId),
+      JSON.stringify([...ids]),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const removeJornadaFromLocalForUser = (
+  userId: string,
+  jornadaId: string,
+): boolean => {
+  if (!userId || !jornadaId) return false;
+  const loaded = loadRegistroJornadasWithStatus(userId);
+  if (loaded.corrupted) return false;
+  const remaining = loaded.items.filter((item) => item.id !== jornadaId);
+  if (remaining.length === loaded.items.length) return true;
+  try {
+    localStorage.setItem(getRegistroStorageKey(userId), JSON.stringify(remaining));
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 export type ArchiveResult =
