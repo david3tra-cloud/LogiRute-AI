@@ -65,8 +65,10 @@ import {
 import { userStorageKey } from "./destinatariosService";
 import { RouteCloudPanel } from "./RouteCloudPanel";
 import { loadRouteSnapshot, saveRouteSnapshot } from "./routeSnapshotStorage";
+import { computeRouteFingerprint } from "./registroJornadasService";
 import type { RemoteRoute } from "./rutasSupabaseService";
 import { RegistroNubeModal as RegistroModal } from "./RegistroNubeModal";
+import { parseLecturaKm, validateLecturasKm } from "./jornadaMetricas.mjs";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -423,6 +425,12 @@ const App: React.FC = () => {
   const [manualSequence, setManualSequence] = useState<string[]>([]);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
   const [routeStorageError, setRouteStorageError] = useState<string | null>(null);
+  const [kilometrajeInicial, setKilometrajeInicial] = useState("");
+  const [kilometrajeFinal, setKilometrajeFinal] = useState("");
+  const [kilometrajeAsociacionPendiente, setKilometrajeAsociacionPendiente] = useState(false);
+  const [kilometrajeNotice, setKilometrajeNotice] = useState("");
+  const kilometrajeInicialRef = useRef<HTMLInputElement>(null);
+  const kilometrajeFinalRef = useRef<HTMLInputElement>(null);
 
   const [viewMode, setViewMode] = useState<
     "split" | "map" | "list" | "control"
@@ -463,6 +471,7 @@ const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
   const [isRegistroOpen, setIsRegistroOpen] = useState(false);
+  const [isClosingJornada, setIsClosingJornada] = useState(false);
   const isClosingJornadaRef = useRef(false);
   const cloudCloseRef = useRef<(() => Promise<void>) | null>(null);
   const sessionUserRef = useRef<string | null>(null);
@@ -589,6 +598,10 @@ const App: React.FC = () => {
     if (!userId) {
       setDeliveries([]);
       setManualSequence([]);
+      setKilometrajeInicial("");
+      setKilometrajeFinal("");
+      setKilometrajeAsociacionPendiente(false);
+      setKilometrajeNotice("");
       setHydratedUserId(null);
       return;
     }
@@ -599,6 +612,10 @@ const App: React.FC = () => {
       }));
       setDeliveries(snapshot.deliveries);
       setManualSequence(snapshot.sequence);
+      setKilometrajeInicial(snapshot.kilometrajeInicial ?? "");
+      setKilometrajeFinal(snapshot.kilometrajeFinal ?? "");
+      setKilometrajeAsociacionPendiente(snapshot.kilometrajeAsociacionPendiente ?? false);
+      setKilometrajeNotice("");
       setRouteStorageError(null);
       setHydratedUserId(userId);
     } catch (error) {
@@ -616,14 +633,28 @@ const App: React.FC = () => {
       // usuario autenticado y cuando el estado en memoria corresponde ya a su
       // hidratación; así nunca se escribe el estado de A bajo la clave de B.
       if (user && canPersistForCurrentSession(user, hydratedUserId)) {
-        const ok = saveRouteSnapshot(user.id, deliveries, manualSequence);
+        const ok = saveRouteSnapshot(user.id, deliveries, manualSequence, {
+          kilometrajeInicial,
+          kilometrajeFinal,
+          kilometrajeAsociacionPendiente,
+        });
         setRouteStorageError(ok ? null : "No se pudo guardar la ruta local. Conserva la aplicación abierta y revisa el almacenamiento antes de continuar.");
       }
       localStorage.setItem(VIEW_MODE_KEY, viewMode);
     } catch {
       // ignorar errores de storage
     }
-  }, [deliveries, manualSequence, viewMode, isAppClosed, user, hydratedUserId]);
+  }, [deliveries, manualSequence, viewMode, isAppClosed, user, hydratedUserId, kilometrajeInicial, kilometrajeFinal, kilometrajeAsociacionPendiente]);
+
+  const handleKilometrajeChange = (kind: "inicial" | "final", value: string) => {
+    setKilometrajeNotice("");
+    if (kind === "inicial") setKilometrajeInicial(value);
+    else setKilometrajeFinal(value);
+  };
+
+  const confirmKilometrajeLocal = () => {
+    if (user?.id && hydratedUserId === user.id) setKilometrajeNotice("Lecturas guardadas en este dispositivo. Se asociarán al ID de jornada al confirmar el cierre en nube.");
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1157,6 +1188,7 @@ const App: React.FC = () => {
         status: DeliveryStatus.PENDING,
         type: DeliveryType.DELIVERY,
         notes: notes || undefined,
+        pesoKg: parseLecturaKm(deca.pesoKg ?? ""),
       };
 
       deliveriesRef.current = [...deliveriesRef.current, newDelivery];
@@ -1214,13 +1246,29 @@ const App: React.FC = () => {
 
   const handleClearAll = async () => {
     if (isClosingJornadaRef.current) return;
+    if (kilometrajeAsociacionPendiente) {
+      setRouteNotice("Las lecturas locales pertenecen a una ruta distinta. Confirma que corresponden a la ruta actual o descártalas y vuelve a introducirlas antes de cerrar.");
+      setViewMode("control");
+      return;
+    }
+    const readings = validateLecturasKm(kilometrajeInicial, kilometrajeFinal);
+    if ("reason" in readings) {
+      setRouteNotice(`${readings.reason} Completa las lecturas en Control de la jornada antes de cerrar.`);
+      setViewMode("control");
+      window.setTimeout(() => {
+        if (!kilometrajeInicial.trim() || parseLecturaKm(kilometrajeInicial) === null) kilometrajeInicialRef.current?.focus();
+        else kilometrajeFinalRef.current?.focus();
+      }, 0);
+      return;
+    }
     if (!user?.id || hydratedUserId !== user.id || !cloudCloseRef.current) {
       alert("Espera a que la sesión y el servicio de nube estén preparados.");
       return;
     }
     isClosingJornadaRef.current = true;
+    setIsClosingJornada(true);
     try { await cloudCloseRef.current(); }
-    finally { isClosingJornadaRef.current = false; }
+    finally { isClosingJornadaRef.current = false; setIsClosingJornada(false); }
   };
 
   const handleOptimizeRoute = () => {
@@ -1284,6 +1332,7 @@ const App: React.FC = () => {
       d.status === DeliveryStatus.PENDING ||
       d.status === DeliveryStatus.IN_PROGRESS,
   ).length;
+  const kilometrajeValidation = validateLecturasKm(kilometrajeInicial, kilometrajeFinal);
 
   const sortedDeliveries: Delivery[] = React.useMemo(() => {
     const byId: Record<string, Delivery> = {};
@@ -1707,6 +1756,15 @@ const App: React.FC = () => {
             suspendAuto={isAdding || isParsing || isResolvingMapsUrl || isOptimizing}
             deliveries={deliveries}
             sequence={manualSequence}
+            kilometrajeInicial={kilometrajeInicial}
+            kilometrajeFinal={kilometrajeFinal}
+            kilometrajeAsociacionConfirmada={!kilometrajeAsociacionPendiente}
+            onKilometrajeJornadaCerrada={() => {
+              setKilometrajeInicial("");
+              setKilometrajeFinal("");
+              setKilometrajeAsociacionPendiente(false);
+              setKilometrajeNotice("Jornada cerrada. Introduce las lecturas del nuevo día.");
+            }}
             registerClose={(close) => {
               cloudCloseRef.current = close;
               return () => {
@@ -1717,9 +1775,31 @@ const App: React.FC = () => {
             }}
             applyRoute={(ownerId: string, route: RemoteRoute) => {
               if (sessionUserRef.current !== ownerId || hydratedUserId !== ownerId) return false;
-              if (!saveRouteSnapshot(ownerId, route.deliveries, route.sequence)) return false;
+              const localIds = deliveries.map((delivery) => delivery.id);
+              const remoteIds = route.deliveries.map((delivery) => delivery.id);
+              const sharesActiveStops = localIds.length === 0 || remoteIds.some((id) => localIds.includes(id));
+              const replacesActiveRoute = !sharesActiveStops;
+              const hasOdometerDraft = Boolean(kilometrajeInicial.trim() || kilometrajeFinal.trim());
+              const requiresOdometerReview = replacesActiveRoute && hasOdometerDraft;
+              const odometer = replacesActiveRoute
+                ? {
+                    kilometrajeInicial: hasOdometerDraft ? kilometrajeInicial : "",
+                    kilometrajeFinal: hasOdometerDraft ? kilometrajeFinal : "",
+                    kilometrajeAsociacionPendiente: requiresOdometerReview,
+                  }
+                : { kilometrajeAsociacionPendiente };
+              if (!saveRouteSnapshot(ownerId, route.deliveries, route.sequence, odometer)) return false;
               setDeliveries(route.deliveries);
               setManualSequence(route.sequence);
+              if (requiresOdometerReview) {
+                setKilometrajeAsociacionPendiente(true);
+                setKilometrajeNotice("La ruta cargada es distinta. Las lecturas anteriores se conservaron para que confirmes a qué ruta corresponden.");
+              } else if (replacesActiveRoute) {
+                setKilometrajeAsociacionPendiente(false);
+                setKilometrajeInicial("");
+                setKilometrajeFinal("");
+                setKilometrajeNotice("La ruta cargada es distinta; introduce las lecturas de su jornada.");
+              }
               setSelectedId(null);
               return true;
             }}
@@ -1808,6 +1888,31 @@ const App: React.FC = () => {
                       </span>
                     </div>
                   </div>
+
+                  <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="odometer-heading">
+                    <h3 id="odometer-heading" className="text-sm font-black text-slate-800">Kilometraje del vehículo</h3>
+                    <p className="mt-1 text-xs text-slate-500">Lecturas del cuentakilómetros, no distancias calculadas por GPS. Se guardan localmente al introducirlas y se asociarán al ID de jornada al cerrar en nube.</p>
+                    {kilometrajeAsociacionPendiente && <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                      <p>Se cargó una ruta distinta de la que acompañaba estas lecturas. Revísalas antes de asociarlas.</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button type="button" onClick={() => { setKilometrajeAsociacionPendiente(false); setKilometrajeNotice("Asociación confirmada para la ruta actual."); }} className="rounded-lg border border-amber-400 bg-white px-3 py-2 font-bold">Confirmar que corresponden a esta ruta</button>
+                        <button type="button" onClick={() => { setKilometrajeInicial(""); setKilometrajeFinal(""); setKilometrajeAsociacionPendiente(false); setKilometrajeNotice("Lecturas descartadas. Introduce las de la ruta actual."); }} className="rounded-lg border border-amber-400 bg-white px-3 py-2 font-bold">Descartar y volver a introducir</button>
+                      </div>
+                    </div>}
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <label className="text-xs font-bold text-slate-700">Kilometraje inicial
+                        <input ref={kilometrajeInicialRef} type="text" inputMode="decimal" autoComplete="off" value={kilometrajeInicial} disabled={isClosingJornada} onChange={(event) => handleKilometrajeChange("inicial", event.target.value)} onBlur={confirmKilometrajeLocal} aria-invalid={Boolean(kilometrajeInicial.trim() && parseLecturaKm(kilometrajeInicial) === null)} className="mt-1 block w-full rounded-xl border px-3 py-2 text-sm disabled:bg-slate-100" placeholder="Lectura al comenzar el día" />
+                      </label>
+                      <label className="text-xs font-bold text-slate-700">Kilometraje final
+                        <input ref={kilometrajeFinalRef} type="text" inputMode="decimal" autoComplete="off" value={kilometrajeFinal} disabled={isClosingJornada} onChange={(event) => handleKilometrajeChange("final", event.target.value)} onBlur={confirmKilometrajeLocal} aria-invalid={Boolean(kilometrajeFinal.trim() && parseLecturaKm(kilometrajeFinal) === null)} className="mt-1 block w-full rounded-xl border px-3 py-2 text-sm disabled:bg-slate-100" placeholder="Lectura al terminar el día" />
+                      </label>
+                    </div>
+                    {kilometrajeInicial.trim() && parseLecturaKm(kilometrajeInicial) === null && <p className="mt-2 text-xs text-red-700">El kilometraje inicial debe ser un número válido no negativo.</p>}
+                    {kilometrajeFinal.trim() && parseLecturaKm(kilometrajeFinal) === null && <p className="mt-2 text-xs text-red-700">El kilometraje final debe ser un número válido no negativo.</p>}
+                    {kilometrajeInicial.trim() && kilometrajeFinal.trim() && "reason" in kilometrajeValidation && parseLecturaKm(kilometrajeInicial) !== null && parseLecturaKm(kilometrajeFinal) !== null && <p className="mt-2 text-xs text-red-700">{kilometrajeValidation.reason}</p>}
+                    {"distance" in kilometrajeValidation && <p className="mt-2 text-xs font-bold text-slate-700">Kilómetros recorridos: {kilometrajeValidation.distance}</p>}
+                    {kilometrajeNotice && <p role="status" className="mt-2 text-xs text-slate-600">{kilometrajeNotice}</p>}
+                  </section>
 
                   <div className="flex flex-wrap gap-4">
                     <button
@@ -2150,7 +2255,7 @@ const App: React.FC = () => {
       <section
         className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "billing" ? "block" : "hidden"}`}
       >
-        <BillingSection />
+        <BillingSection userId={user?.id} />
       </section>
       <RegistroModal
         isOpen={isRegistroOpen}

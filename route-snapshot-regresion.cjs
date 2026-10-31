@@ -56,7 +56,7 @@ test("Instantánea: fallo de escritura mantiene íntegra la versión previa", ()
   const before = [...s.data.entries()]; s.fail(true);
   assert.equal(snapshot.saveRouteSnapshot("A", [delivery("new")], ["new"]), false);
   assert.deepEqual([...s.data.entries()], before);
-  assert.deepEqual(snapshot.loadRouteSnapshot("A", legacy), { userId: "A", ...legacy() });
+  assert.deepEqual(snapshot.loadRouteSnapshot("A", legacy), { userId: "A", ...legacy(), kilometrajeInicial: "", kilometrajeFinal: "", kilometrajeAsociacionPendiente: false });
 });
 test("Instantánea: fallo inicial no crea una ruta parcial", () => {
   const s = fixture(); s.fail(true);

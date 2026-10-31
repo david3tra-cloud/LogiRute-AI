@@ -97,6 +97,17 @@ const supabase = {
     }),
   },
   from(table) {
+    if (table === "kilometraje_jornadas") {
+      const query = {
+        select() { return this; },
+        eq(column, value) { if (column === "user_id") assert.equal(value, "user-1"); return this; },
+        in: async (_column, ids) => ({
+          data: ids.includes("remote-1") ? [{ user_id: "user-1", source_jornada_id: "remote-1", estado: "COMPLETA", kilometraje_inicial: 100, kilometraje_final: 125, kilometros_recorridos: 25 }] : [],
+          error: null,
+        }),
+      };
+      return query;
+    }
     assert.equal(table, "registro_jornadas");
     const query = {
       select() { return this; },
@@ -211,6 +222,7 @@ async function run() {
       remote,
     );
     assert.equal(remote.length, 101);
+    assert.equal(remote.find((item) => item.id === "remote-1").kilometrosRecorridos, 25);
     assert.ok(remote.some((item) => item.id === "deleted-page-2" && isDeletedJornada(item)));
     assert.ok(!merged.items.some((item) => item.id === "deleted-page-2"));
     assert.ok(merged.items.some((item) => item.id === "local-only"));

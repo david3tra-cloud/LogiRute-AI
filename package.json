@@ -11,6 +11,7 @@
     "test:empresas": "node empresas-regresion.cjs && node empresas-resolucion-test.cjs",
     "test:aislamiento": "node aislamiento-regresion.cjs",
     "test:registro": "node registro-regresion.cjs",
+    "test:kilometraje-facturacion": "node kilometraje-facturacion-regresion.cjs",
     "test:deca-csv": "node deca-csv-regresion.cjs",
     "test:deca-deletion": "node deca-deletion-regresion.cjs"
   },

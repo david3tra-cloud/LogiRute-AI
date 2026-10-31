@@ -6,17 +6,23 @@ import { Delivery, JornadaRegistro } from "./types";
 import { loadRemoteRoute, saveRemoteRoute, RemoteRoute, RouteConflictError } from "./rutasSupabaseService";
 import { computeRouteFingerprint, generateStableId, loadPendingClosureMarker, isJornadaRegistro, rememberDeletedJornadaForUser } from "./registroJornadasService";
 import { isDeletedClosureDuplicate, isDeletedJornada } from "./registroJornadaSync";
+import { validateLecturasKm } from "./jornadaMetricas.mjs";
+import { saveClosedJourneyKilometraje } from "./kilometrajeSupabaseService";
 
 interface Props {
   userId: string;
   hydratedUserId: string | null;
   deliveries: Delivery[];
   sequence: string[];
+  kilometrajeInicial: string;
+  kilometrajeFinal: string;
+  kilometrajeAsociacionConfirmada: boolean;
+  onKilometrajeJornadaCerrada: () => void;
   suspendAuto?: boolean;
   applyRoute: (userId: string, route: RemoteRoute) => boolean;
   registerClose: (close: () => Promise<void>) => () => void;
 }
-interface PendingClose { id: string; fingerprint: string; revision: number }
+interface PendingClose { id: string; fingerprint: string; revision: number; kilometrajeInicial?: string; kilometrajeFinal?: string; kilometrajeRequerido?: boolean }
 const pendingKey = (uid: string) => `logiroute_cloud_close_v1:${uid}`;
 const signature = (d: Delivery[], s: string[]) => computeRouteFingerprint(d, s);
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String((e as { message?: string })?.message ?? e);
@@ -198,15 +204,27 @@ export const RouteCloudPanel: React.FC<Props> = props => {
   });
   const close = () => run(async valid => {
     legacyGuard();
+    if (!latest.current.kilometrajeAsociacionConfirmada && !readPending()) {
+      throw new Error("Confirma o descarta las lecturas locales antes de cerrar esta ruta.");
+    }
     let marker = readPending();
+    if (marker?.kilometrajeRequerido &&
+        (marker.kilometrajeInicial === undefined || marker.kilometrajeFinal === undefined)) {
+      const readings = validateLecturasKm(latest.current.kilometrajeInicial, latest.current.kilometrajeFinal);
+      if ("reason" in readings) throw new Error(`${readings.reason} El resumen está cerrado y espera estas lecturas; la ruta y el marcador se conservan.`);
+      marker = { ...marker, kilometrajeInicial: latest.current.kilometrajeInicial, kilometrajeFinal: latest.current.kilometrajeFinal };
+      localStorage.setItem(pendingKey(uid), JSON.stringify(marker));
+    }
     if (!marker) {
       if (!ready) throw new Error("Primero consulta o guarda la ruta en nube.");
       if (!latest.current.deliveries.length) { setNotice("La ruta está vacía."); return; }
+      const odometer = validateLecturasKm(latest.current.kilometrajeInicial, latest.current.kilometrajeFinal);
+      if ("reason" in odometer) throw new Error(`${odometer.reason} Vuelve a Control de la jornada; la ruta se conserva.`);
       if (!window.confirm("¿Cerrar jornada? Se guardará en el Registro de Supabase y se vaciará la ruta compartida. Las paradas pendientes conservarán su estado en el historial.")) return;
       const result = await saveSnapshot(valid);
       if (!result || !valid()) return;
       if (result.fingerprint !== signature(latest.current.deliveries, latest.current.sequence)) throw new Error("La ruta local cambió mientras se guardaba. No se cierra.");
-      marker = { id: generateStableId(), fingerprint: result.fingerprint, revision: result.row.revision };
+      marker = { id: generateStableId(), fingerprint: result.fingerprint, revision: result.row.revision, kilometrajeInicial: latest.current.kilometrajeInicial, kilometrajeFinal: latest.current.kilometrajeFinal };
       localStorage.setItem(pendingKey(uid), JSON.stringify(marker)); setPending(true);
     }
     await session();
@@ -247,6 +265,27 @@ export const RouteCloudPanel: React.FC<Props> = props => {
       setPending(false);
       setNotice("Este cierre ya corresponde a un resumen eliminado. No se ha vuelto a archivar ni se ha vaciado la ruta activa.");
       return;
+    }
+    try {
+      await saveClosedJourneyKilometraje(
+        uid,
+        jornada.id,
+        marker.kilometrajeInicial ?? null,
+        marker.kilometrajeFinal ?? null,
+      );
+    } catch (error) {
+      const message = messageOf(error);
+      if (marker.kilometrajeInicial === undefined && marker.kilometrajeFinal === undefined &&
+          message.includes("New journeys require both odometer readings")) {
+        marker = { ...marker, kilometrajeRequerido: true };
+        localStorage.setItem(pendingKey(uid), JSON.stringify(marker));
+        throw new Error("El resumen ya existe, pero la captura definitiva sigue pendiente. Introduce ambas lecturas en Control de la jornada y reintenta el cierre.");
+      }
+      throw error;
+    }
+    if (!valid()) return;
+    if (marker.kilometrajeInicial !== undefined && marker.kilometrajeFinal !== undefined) {
+      latest.current.onKilometrajeJornadaCerrada();
     }
     if (signature(latest.current.deliveries, latest.current.sequence) !== marker.fingerprint && signature(latest.current.deliveries, latest.current.sequence) !== signature(row.deliveries, row.sequence)) {
       backup();

@@ -31,6 +31,8 @@ export interface Delivery {
   notes?: string;
   estimatedTime?: string;
   sourceUrl?: string;
+  /** Structured DeCA shipment weight in kilograms. Null/undefined means unknown. */
+  pesoKg?: number | null;
 }
 
 export type AddDeCAToRoutesResult =
@@ -159,6 +161,10 @@ export interface JornadaRegistro {
   deliveries: Delivery[];
   sequence: string[];
   deletedAt?: string | null;
+  kilometrajeInicial?: number | null;
+  kilometrajeFinal?: number | null;
+  kilometrosRecorridos?: number | null;
+  kilometrajeEstado?: "PENDIENTE" | "COMPLETA";
 }
 
 export type PendingClosureStatus = "ARCHIVING" | "CLEARING_ROUTE" | "COMPLETED";

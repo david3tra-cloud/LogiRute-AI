@@ -82,7 +82,33 @@ export async function listRemoteJornadas(userId: string): Promise<JornadaRegistr
       validateRoute(item.deliveries, item.sequence);
       items.push(item);
     }
-    if ((data ?? []).length < pageSize) return items;
+    if ((data ?? []).length < pageSize) {
+      if (!items.length) return items;
+      const byJourney = new Map<string, { user_id: string; estado: "PENDIENTE" | "COMPLETA"; kilometraje_inicial: number | null; kilometraje_final: number | null; kilometros_recorridos: number | null }>();
+      for (let index = 0; index < items.length; index += pageSize) {
+        const pageIds = items.slice(index, index + pageSize).map((item) => item.id);
+        const { data: metrics, error: metricsError } = await supabase
+          .from('kilometraje_jornadas')
+          .select('user_id,source_jornada_id,estado,kilometraje_inicial,kilometraje_final,kilometros_recorridos')
+          .eq('user_id', userId)
+          .in('source_jornada_id', pageIds);
+        if (metricsError) throw metricsError;
+        await assertSession(userId);
+        for (const metric of metrics ?? []) byJourney.set(metric.source_jornada_id, metric);
+      }
+      for (const item of items) {
+        const metric = byJourney.get(item.id);
+        if (metric?.user_id === userId) {
+          item.kilometrajeEstado = metric.estado;
+          if (metric.estado === "COMPLETA") {
+            item.kilometrajeInicial = Number(metric.kilometraje_inicial);
+            item.kilometrajeFinal = Number(metric.kilometraje_final);
+            item.kilometrosRecorridos = Number(metric.kilometros_recorridos);
+          }
+        }
+      }
+      return items;
+    }
   }
 }
 
