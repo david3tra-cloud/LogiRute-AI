@@ -51,7 +51,8 @@ const routeCsvService = loadTsModule("routeCsvService.ts", {
 });
 const { appendImportedRouteStops, previewRoutesCsv, routeTemplateCsv } =
   routeCsvService;
-const { getDeliveryCardTitle } = loadTsModule("deliveryDisplay.ts");
+const { getDeliveryCardTitle, getVisibleDeliveryNotes } =
+  loadTsModule("deliveryDisplay.ts");
 
 console.log("Iniciando pruebas de regresión para importación CSV de rutas...\n");
 
@@ -186,6 +187,29 @@ console.log("Iniciando pruebas de regresión para importación CSV de rutas...\n
   );
   assert.equal(noPhoneColumn.rows[0].delivery.phone, undefined);
   console.log("PASS: Destinatario como título, respaldo antiguo y aliases de teléfono.");
+}
+
+{
+  assert.equal(
+    getVisibleDeliveryNotes(
+      "Mercancía: Paquetería · Bultos: 3 · Peso: 20 kg · Referencia: ALB-001",
+    ),
+    "Mercancía: Paquetería · Bultos: 3 · Peso: 20 kg",
+  );
+  assert.equal(
+    getVisibleDeliveryNotes("Referencia: ALB-001 · Entregar en recepción"),
+    "Entregar en recepción",
+  );
+  assert.equal(
+    getVisibleDeliveryNotes("Bultos: 2 · Peso: 8 kg"),
+    "Bultos: 2 · Peso: 8 kg",
+  );
+  assert.equal(getVisibleDeliveryNotes("Referencia: ALB-001"), "");
+  assert.equal(
+    getVisibleDeliveryNotes("Avisar: la referencia está en el albarán"),
+    "Avisar: la referencia está en el albarán",
+  );
+  console.log("PASS: Ocultación de referencia estructurada sin perder otras notas.");
 }
 
 {

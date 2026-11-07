@@ -6,3 +6,9 @@ export const getDeliveryCardTitle = (
   delivery.recipient.trim() ||
   delivery.concept ||
   (delivery.sourceType === "DECA" ? "Destinatario no especificado" : "");
+
+export const getVisibleDeliveryNotes = (notes?: string): string =>
+  (notes ?? "")
+    .split(" · ")
+    .filter((segment) => !/^Referencia\s*:/i.test(segment.trim()))
+    .join(" · ");

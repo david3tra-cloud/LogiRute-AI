@@ -3,7 +3,10 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { Delivery, DeliveryStatus, DeliveryType } from './types';
 import { isValidCoordinatePair } from './mapsUrlService';
-import { getDeliveryCardTitle } from './deliveryDisplay';
+import {
+  getDeliveryCardTitle,
+  getVisibleDeliveryNotes,
+} from './deliveryDisplay';
 import {
   CheckCircle,
   Clock,
@@ -192,6 +195,7 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
 
   const navigationUrl = buildNavigationUrl();
   const cardTitle = getDeliveryCardTitle(delivery);
+  const visibleNotes = getVisibleDeliveryNotes(delivery.notes);
 
   return (
     <div
@@ -369,12 +373,12 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                 </a>
               </div>
 
-              {delivery.notes && (
+              {visibleNotes && (
                 <div className="bg-white/60 p-3 rounded-xl text-[11px] text-slate-600 border border-slate-100">
                   <span className="font-bold text-slate-400 uppercase text-[9px] block mb-1">
                     Notas del Reparto:
                   </span>
-                  {delivery.notes}
+                  {visibleNotes}
                 </div>
               )}
 
