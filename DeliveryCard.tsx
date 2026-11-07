@@ -18,7 +18,6 @@ import {
   AlertTriangle,
   Phone,
   X,
-  Tag,
   Pencil,
 } from 'lucide-react';
 
@@ -290,12 +289,6 @@ const DeliveryCard: React.FC<DeliveryCardProps> = ({
                 <MapPin size={12} className="shrink-0" />
                 <p className="truncate opacity-80">{displayAddress}</p>
               </div>
-              {delivery.recipient.trim() && delivery.concept && (
-                <p className="truncate text-[10px] text-slate-400 mt-0.5">
-                  <Tag size={10} className="inline mr-1" />
-                  Referencia / concepto: {delivery.concept}
-                </p>
-              )}
             </div>
           </div>
 
