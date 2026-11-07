@@ -6,6 +6,11 @@ import { aggregateKilometros, aggregatePesos } from "./jornadaMetricas.mjs";
 
 interface Props { userId?: string }
 
+type WeightBucket = ReturnType<typeof aggregatePesos>["deliveries"];
+
+const formatWeightBucket = (bucket: WeightBucket) =>
+  `${bucket.plannedWithWeight ? `${bucket.plannedKg} kg planificados en ${bucket.plannedWithWeight} paradas con peso${bucket.plannedMissing ? `; ${bucket.plannedMissing} paradas sin dato` : ""}` : bucket.plannedMissing ? `${bucket.plannedMissing} paradas sin dato de peso` : "Sin datos planificados"}${bucket.completedWithWeight ? ` · ${bucket.completedKg} kg realizados en ${bucket.completedWithWeight} paradas completadas con peso${bucket.completedMissing ? `; ${bucket.completedMissing} sin dato` : ""}` : bucket.completedMissing ? ` · ${bucket.completedMissing} paradas completadas sin peso` : ""}`;
+
 const currentMonth = () => {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Madrid", year: "numeric", month: "2-digit",
@@ -61,7 +66,7 @@ const BillingSection: React.FC<Props> = ({ userId }) => {
         <section className="mt-3 grid gap-3 sm:grid-cols-2">
           <div className="rounded-2xl border bg-white p-4"><h2 className="font-bold">Kilómetros recorridos</h2><p className="mt-1 text-sm">{kmTotals.total === 0 || kmTotals.missing === kmTotals.total ? "Sin datos" : kmTotals.missing === 0 ? `${kmTotals.km} km en ${kmTotals.total} jornadas` : `${kmTotals.km} km registrados; faltan datos en ${kmTotals.missing} de ${kmTotals.total} jornadas (acumulado parcial)`}</p>{kmTotals.total > 0 && kmTotals.missing === kmTotals.total && <p className="mt-1 text-xs text-amber-800">Faltan datos en las {kmTotals.missing} jornadas del mes.</p>}</div>
           <div className="rounded-2xl border bg-white p-4"><h2 className="font-bold">Peso de entregas y recogidas</h2>
-            {([['Entregas', weightTotals.deliveries], ['Recogidas', weightTotals.pickups]] as const).map(([label, bucket]) => <p key={label} className="mt-1 text-sm">{label}: {bucket.plannedWithWeight ? `${bucket.plannedKg} kg planificados en ${bucket.plannedWithWeight} paradas con peso${bucket.plannedMissing ? `; ${bucket.plannedMissing} paradas sin dato` : ""}` : bucket.plannedMissing ? `${bucket.plannedMissing} paradas sin dato de peso` : "Sin datos planificados"}{bucket.completedWithWeight ? ` · ${bucket.completedKg} kg realizados en ${bucket.completedWithWeight} paradas completadas con peso${bucket.completedMissing ? `; ${bucket.completedMissing} sin dato` : ""}` : bucket.completedMissing ? ` · ${bucket.completedMissing} paradas completadas sin peso` : ""}</p>)}
+            {([['Entregas', weightTotals.deliveries], ['Recogidas', weightTotals.pickups]] as const).map(([label, bucket]) => <p key={label} className="mt-1 text-sm">{label}: {formatWeightBucket(bucket)}</p>)}
             {weightTotals.missingSnapshots > 0 && <p className="mt-1 text-xs text-amber-800">No se pudieron evaluar los pesos de {weightTotals.missingSnapshots} jornadas por instantáneas incompletas; los valores mostrados no son un total completo.</p>}
           </div>
         </section>
@@ -69,6 +74,7 @@ const BillingSection: React.FC<Props> = ({ userId }) => {
           {!loading && selected.length === 0 && <p className="rounded-2xl border bg-white p-5 text-sm text-slate-600">No hay jornadas enviadas para este mes.</p>}
           {selected.map((record) => {
             const counts = aggregateActivity([record]);
+            const dayWeights = aggregatePesos([record]);
             const kilometers = record.snapshot.kilometrosRecorridos;
             const meterInitial = record.snapshot.kilometrajeInicial;
             const meterFinal = record.snapshot.kilometrajeFinal;
@@ -76,6 +82,8 @@ const BillingSection: React.FC<Props> = ({ userId }) => {
             return <article key={record.id} className="rounded-2xl border bg-white p-4">
               <button type="button" aria-expanded={isExpanded} onClick={() => setExpandedId(isExpanded ? null : record.id)} className="w-full text-left"><div className="flex flex-wrap items-start justify-between gap-2"><div><h2 className="font-bold">Jornada del {new Date(`${record.work_date}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "long", timeZone: "Europe/Madrid" })}</h2><p className="mt-1 text-xs text-slate-500">Cierre: {new Date(record.source_closed_at).toLocaleString("es-ES", { timeZone: "Europe/Madrid" })} · ID {record.source_jornada_id.slice(0, 8)}</p></div><span className="text-xs text-emerald-700">Enviada</span></div>
               <p className="mt-3 text-sm">{counts.complete ? `Entregas: ${counts.deliveries.completed} realizadas / ${counts.deliveries.planned} planificadas · Recogidas: ${counts.pickups.completed} realizadas / ${counts.pickups.planned} planificadas` : "Datos de actividad: Sin datos"}</p>
+              <p className="mt-1 text-sm">Kilos de entregas: {dayWeights.missingSnapshots > 0 ? "Sin datos" : formatWeightBucket(dayWeights.deliveries)}</p>
+              <p className="mt-1 text-sm">Kilos de recogidas: {dayWeights.missingSnapshots > 0 ? "Sin datos" : formatWeightBucket(dayWeights.pickups)}</p>
               <p className="mt-1 text-sm">Lecturas del cuentakilómetros: {typeof meterInitial === "number" && typeof meterFinal === "number" ? `${meterInitial} km → ${meterFinal} km` : "Sin datos"}</p>
               <p className="mt-1 text-sm">Kilómetros recorridos: {typeof kilometers === "number" ? `${kilometers} km` : "Sin datos"}</p></button>
               {isExpanded && <JornadaDetalle deliveries={Array.isArray(record.snapshot.deliveries) ? record.snapshot.deliveries : []} sequence={Array.isArray(record.snapshot.sequence) ? record.snapshot.sequence : []} />}
