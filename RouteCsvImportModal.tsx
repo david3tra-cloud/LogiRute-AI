@@ -14,7 +14,9 @@ import {
 
 interface Props {
   onClose: () => void;
-  onImport: (rows: Extract<RouteCsvRow, { kind: "valid" }>[]) => void;
+  onImport: (
+    rows: Extract<RouteCsvRow, { kind: "valid" }>[],
+  ) => void | Promise<void>;
   disabled?: boolean;
 }
 
@@ -27,6 +29,8 @@ export const RouteCsvImportModal: React.FC<Props> = ({
   const [preview, setPreview] = useState<RouteCsvPreview | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importingRef = useRef(false);
 
   const validRows = preview
     ? (preview.rows.filter((r) => r.kind === "valid") as Extract<
@@ -44,6 +48,7 @@ export const RouteCsvImportModal: React.FC<Props> = ({
   const handleFile = (file: File) => {
     setFileName(file.name);
     setPreview(null);
+    setImportError(null);
     const reader = new FileReader();
     reader.onload = (e) => {
       const content = e.target?.result as string;
@@ -65,12 +70,21 @@ export const RouteCsvImportModal: React.FC<Props> = ({
     if (file) handleFile(file);
   };
 
-  const handleImportConfirm = () => {
-    if (validRows.length === 0 || importing) return;
+  const handleImportConfirm = async () => {
+    if (validRows.length === 0 || importingRef.current || disabled) return;
+    importingRef.current = true;
     setImporting(true);
+    setImportError(null);
     try {
-      onImport(validRows);
+      await onImport(validRows);
+    } catch (error) {
+      setImportError(
+        error instanceof Error
+          ? error.message
+          : "No se pudieron importar las paradas.",
+      );
     } finally {
+      importingRef.current = false;
       setImporting(false);
     }
   };
@@ -156,6 +170,13 @@ export const RouteCsvImportModal: React.FC<Props> = ({
             <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
               <AlertTriangle size={16} className="shrink-0 mt-0.5" />
               <span>{preview.headerError}</span>
+            </div>
+          )}
+
+          {importError && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              <span>{importError}</span>
             </div>
           )}
 
@@ -288,7 +309,7 @@ export const RouteCsvImportModal: React.FC<Props> = ({
             className="px-5 py-2 rounded-xl text-sm font-black uppercase bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-40 flex items-center gap-2"
           >
             {importing ? (
-              "Importando…"
+              "Geocodificando e importando…"
             ) : (
               <>
                 <Upload size={14} />

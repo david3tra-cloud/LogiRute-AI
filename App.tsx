@@ -70,7 +70,10 @@ import type { RemoteRoute } from "./rutasSupabaseService";
 import { RegistroNubeModal as RegistroModal } from "./RegistroNubeModal";
 import { parseLecturaKm, validateLecturasKm } from "./jornadaMetricas.mjs";
 import { RouteCsvImportModal } from "./RouteCsvImportModal";
-import type { RouteCsvRow } from "./routeCsvService";
+import {
+  appendImportedRouteStops,
+  type RouteCsvRow,
+} from "./routeCsvService";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -423,9 +426,12 @@ const App: React.FC = () => {
   const deliveriesRef = useRef(deliveries);
   deliveriesRef.current = deliveries;
   const importingDeCAIdsRef = useRef(new Set<string>());
+  const csvImportInProgressRef = useRef(false);
 
   const [manualSequence, setManualSequence] = useState<string[]>([]);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
+  const hydratedUserIdRef = useRef(hydratedUserId);
+  hydratedUserIdRef.current = hydratedUserId;
   const [routeStorageError, setRouteStorageError] = useState<string | null>(null);
   const [kilometrajeInicial, setKilometrajeInicial] = useState("");
   const [kilometrajeFinal, setKilometrajeFinal] = useState("");
@@ -472,6 +478,8 @@ const App: React.FC = () => {
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
+  const isAppClosedRef = useRef(isAppClosed);
+  isAppClosedRef.current = isAppClosed;
   const [isRegistroOpen, setIsRegistroOpen] = useState(false);
   const [isClosingJornada, setIsClosingJornada] = useState(false);
   const [isCsvImportOpen, setIsCsvImportOpen] = useState(false);
@@ -479,6 +487,10 @@ const App: React.FC = () => {
   const cloudCloseRef = useRef<(() => Promise<void>) | null>(null);
   const sessionUserRef = useRef<string | null>(null);
   sessionUserRef.current = user?.id ?? null;
+  const routeContextVersionRef = useRef(0);
+  useLayoutEffect(() => {
+    routeContextVersionRef.current += 1;
+  }, [user?.id, hydratedUserId]);
   const [currentUserLoc, setCurrentUserLoc] = useState<
     { latitude: number; longitude: number } | undefined
   >(undefined);
@@ -1217,42 +1229,68 @@ const App: React.FC = () => {
     rows: Extract<RouteCsvRow, { kind: "valid" }>[],
   ) => {
     if (rows.length === 0) return;
-    setIsCsvImportOpen(false);
-
-    const newStops: Delivery[] = [];
-    const geocodingErrors: string[] = [];
-
-    for (const row of rows) {
-      const { geocodeQuery, ...deliveryBase } = row.delivery;
-      let coordinates: [number, number] | undefined;
-
-      if (geocodeQuery) {
-        try {
-          const geocoded = await geocodeAddress(geocodeQuery);
-          if (Number.isFinite(geocoded.lat) && Number.isFinite(geocoded.lng)) {
-            coordinates = [geocoded.lat, geocoded.lng];
-          } else {
-            geocodingErrors.push(`Fila ${row.rowNumber}: no se pudo localizar en el mapa.`);
-          }
-        } catch {
-          geocodingErrors.push(`Fila ${row.rowNumber}: error al geocodificar.`);
-        }
-      }
-
-      newStops.push({ ...deliveryBase, coordinates });
+    if (csvImportInProgressRef.current) {
+      throw new Error("Ya hay una importación CSV en curso.");
+    }
+    const ownerId = sessionUserRef.current;
+    const contextVersion = routeContextVersionRef.current;
+    const isImportContextCurrent = () =>
+      sessionUserRef.current === ownerId &&
+      hydratedUserIdRef.current === ownerId &&
+      routeContextVersionRef.current === contextVersion &&
+      !isClosingJornadaRef.current &&
+      !isAppClosedRef.current;
+    if (
+      !ownerId ||
+      hydratedUserIdRef.current !== ownerId ||
+      !isImportContextCurrent()
+    ) {
+      throw new Error("La sesión o jornada ya no está disponible para importar.");
     }
 
-    // Append without replacing existing stops
-    setDeliveries((prev) => [...prev, ...newStops]);
+    csvImportInProgressRef.current = true;
+    try {
+      const newStops: Delivery[] = [];
+      const geocodingErrors: string[] = [];
 
-    if (geocodingErrors.length > 0) {
-      setRouteNotice(
-        `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""}. Sin ubicación en mapa: ${geocodingErrors.length}.`,
-      );
-    } else {
-      setRouteNotice(
-        `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""} correctamente.`,
-      );
+      for (const row of rows) {
+        const { geocodeQuery, ...deliveryBase } = row.delivery;
+        let coordinates: [number, number] | undefined;
+
+        if (geocodeQuery) {
+          try {
+            const geocoded = await geocodeAddress(geocodeQuery);
+            if (Number.isFinite(geocoded.lat) && Number.isFinite(geocoded.lng)) {
+              coordinates = [geocoded.lat, geocoded.lng];
+            } else {
+              geocodingErrors.push(`Fila ${row.rowNumber}: no se pudo localizar en el mapa.`);
+            }
+          } catch {
+            geocodingErrors.push(`Fila ${row.rowNumber}: error al geocodificar.`);
+          }
+        }
+
+        newStops.push({ ...deliveryBase, coordinates });
+      }
+
+      if (!isImportContextCurrent()) {
+        throw new Error("La sesión o jornada cambió durante la importación. No se añadieron las paradas.");
+      }
+
+      setDeliveries((prev) => appendImportedRouteStops(prev, newStops));
+
+      if (geocodingErrors.length > 0) {
+        setRouteNotice(
+          `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""}. Sin ubicación en mapa: ${geocodingErrors.length}.`,
+        );
+      } else {
+        setRouteNotice(
+          `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""} correctamente.`,
+        );
+      }
+      setIsCsvImportOpen(false);
+    } finally {
+      csvImportInProgressRef.current = false;
     }
   };
 
@@ -1315,6 +1353,7 @@ const App: React.FC = () => {
       return;
     }
     isClosingJornadaRef.current = true;
+    routeContextVersionRef.current += 1;
     setIsClosingJornada(true);
     try { await cloudCloseRef.current(); }
     finally { isClosingJornadaRef.current = false; setIsClosingJornada(false); }
@@ -1854,6 +1893,7 @@ const App: React.FC = () => {
                   }
                 : { kilometrajeAsociacionPendiente };
               if (!saveRouteSnapshot(ownerId, route.deliveries, route.sequence, odometer)) return false;
+              routeContextVersionRef.current += 1;
               setDeliveries(route.deliveries);
               setManualSequence(route.sequence);
               if (requiresOdometerReview) {

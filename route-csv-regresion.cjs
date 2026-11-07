@@ -49,7 +49,8 @@ const routeCsvService = loadTsModule("routeCsvService.ts", {
   },
   "./destinatariosService": csvHelpers,
 });
-const { previewRoutesCsv } = routeCsvService;
+const { appendImportedRouteStops, previewRoutesCsv, routeTemplateCsv } =
+  routeCsvService;
 const { getDeliveryCardTitle } = loadTsModule("deliveryDisplay.ts");
 
 console.log("Iniciando pruebas de regresión para importación CSV de rutas...\n");
@@ -276,6 +277,74 @@ console.log("Iniciando pruebas de regresión para importación CSV de rutas...\n
   assert.match(missingLocation.headerError, /ubicación/);
   assert.match(malformedCsv.headerError, /interpretar el CSV/);
   console.log("PASS 3: Cabeceras obligatorias y CSV mal formado.");
+}
+
+{
+  const preview = previewRoutesCsv(
+    [
+      "destinatario;ciudad_destino;peso_kg;bultos;tipo",
+      "Entrega minúscula;Madrid;10;1;entrega",
+      "Entrega enum mayúscula;Sevilla;20;2;DELIVERY",
+      "Recogida;Bilbao;30;3;Recogida",
+      "Pickup enum;Valencia;40;4;PICKUP",
+      "Tipo vacío;Zaragoza;;;",
+      "Alias reparto;Málaga;;;reparto",
+      "Alias recollida;Cádiz;;;recollida",
+      "Tipo desconocido;Córdoba;;;envío",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    Array.from(preview.rows, (row) => row.kind),
+    ["valid", "valid", "valid", "valid", "valid", "error", "error", "error"],
+  );
+  assert.deepEqual(
+    Array.from(preview.rows.slice(0, 5), (row) => row.delivery.type),
+    ["DELIVERY", "DELIVERY", "PICKUP", "PICKUP", "DELIVERY"],
+  );
+  for (const errorRow of preview.rows.slice(5)) {
+    assert.match(errorRow.reason, /tipo desconocido/);
+  }
+
+  const invalidMeasures = previewRoutesCsv(
+    [
+      "destinatario;ciudad_destino;peso_kg;bultos",
+      "Peso negativo;Madrid;-1;1",
+      "Peso inválido;Madrid;abc;1",
+      "Bultos fraccionarios;Madrid;10;1.5",
+      "Bultos negativos;Madrid;10;-2",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    Array.from(invalidMeasures.rows, (row) => row.kind),
+    ["error", "error", "error", "error"],
+  );
+  assert.match(invalidMeasures.rows[0].reason, /peso_kg/);
+  assert.match(invalidMeasures.rows[1].reason, /peso_kg/);
+  assert.match(invalidMeasures.rows[2].reason, /bultos/);
+  assert.match(invalidMeasures.rows[3].reason, /bultos/);
+  console.log("PASS: Tipos mixtos, valores desconocidos, peso y bultos inválidos.");
+}
+
+{
+  const existingStops = [
+    { id: "existing-2", recipient: "Segundo" },
+    { id: "existing-1", recipient: "Primero" },
+  ];
+  const importedStops = [
+    { id: "imported-1", recipient: "Importada 1" },
+    { id: "imported-2", recipient: "Importada 2" },
+  ];
+  const combined = appendImportedRouteStops(existingStops, importedStops);
+  assert.deepEqual(
+    Array.from(combined, (stop) => stop.id),
+    ["existing-2", "existing-1", "imported-1", "imported-2"],
+  );
+  assert.equal(combined[0], existingStops[0]);
+  assert.equal(combined[1], existingStops[1]);
+  assert.ok(routeTemplateCsv().startsWith("\uFEFFdestinatario;telefono;"));
+  assert.match(routeTemplateCsv(), /Cliente Ejemplo S\.L\.;600000001;/);
+  assert.match(routeTemplateCsv(), /Recogida Ejemplo S\.L\.;600000002;/);
+  console.log("PASS: Anexado conserva orden existente y plantilla incluye teléfonos ficticios.");
 }
 
 console.log("\nTodas las pruebas del importador de rutas han pasado.");

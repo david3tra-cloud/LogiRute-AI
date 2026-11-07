@@ -36,13 +36,10 @@ const PHONE_CSV_HEADERS = [
 const TIPO_ENTREGA = new Set([
   "entrega",
   "delivery",
-  "reparto",
 ]);
 const TIPO_RECOGIDA = new Set([
   "recogida",
   "pickup",
-  "recollida",
-  "recoleccion",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -82,6 +79,11 @@ export type RouteCsvPreview = {
   detectedRows: number;
   headerError?: string;
 };
+
+export const appendImportedRouteStops = (
+  existing: Delivery[],
+  imported: Delivery[],
+): Delivery[] => [...existing, ...imported];
 
 // ---------------------------------------------------------------------------
 // Main parser
@@ -207,7 +209,7 @@ export const previewRoutesCsv = (content: string): RouteCsvPreview => {
         return {
           kind: "error",
           rowNumber,
-          reason: `Valor de tipo desconocido: "${getVal("tipo")}". Usa: entrega, recogida, delivery o pickup.`,
+          reason: `Valor de tipo desconocido: "${getVal("tipo")}". Usa: entrega, delivery, recogida o pickup.`,
         };
       }
 
@@ -259,4 +261,4 @@ export const previewRoutesCsv = (content: string): RouteCsvPreview => {
 // Template CSV (mismo separador y estructura que decaCsvService)
 // ---------------------------------------------------------------------------
 export const routeTemplateCsv = (): string =>
-  `\uFEFFdestinatario;direccion_destino;ciudad_destino;referencia_albaran;mercancia;peso_kg;bultos;notas;tipo\r\nCliente Ejemplo S.L.;Calle Mayor 12;Valencia;ALB-2026-001;Paquetería;25.5;3;;entrega\r\nRecogida Ejemplo S.L.;Polígono Norte Nave 4;Madrid;;;50;1;;recogida\r\n`;
+  `\uFEFFdestinatario;telefono;direccion_destino;ciudad_destino;referencia_albaran;mercancia;peso_kg;bultos;notas;tipo\r\nCliente Ejemplo S.L.;600000001;Calle Mayor 12;Valencia;ALB-2026-001;Paquetería;25.5;3;;entrega\r\nRecogida Ejemplo S.L.;600000002;Polígono Norte Nave 4;Madrid;;;50;1;;recogida\r\n`;
