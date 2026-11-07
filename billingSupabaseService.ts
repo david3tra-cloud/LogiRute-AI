@@ -54,3 +54,16 @@ export async function sendJornadaToBilling(
   }
   return row;
 }
+
+export async function deleteBillingRecord(
+  userId: string,
+  jornadaId: string,
+): Promise<boolean> {
+  await assertBillingSession(userId);
+  const { data, error } = await supabase.rpc("eliminar_jornada_facturacion", {
+    p_source_jornada_id: jornadaId,
+  });
+  if (error) throw error;
+  await assertBillingSession(userId);
+  return Boolean(data);
+}
