@@ -69,6 +69,11 @@ import { computeRouteFingerprint } from "./registroJornadasService";
 import type { RemoteRoute } from "./rutasSupabaseService";
 import { RegistroNubeModal as RegistroModal } from "./RegistroNubeModal";
 import { parseLecturaKm, validateLecturasKm } from "./jornadaMetricas.mjs";
+import { RouteCsvImportModal } from "./RouteCsvImportModal";
+import {
+  appendImportedRouteStops,
+  type RouteCsvRow,
+} from "./routeCsvService";
 
 const STORAGE_KEY = "logiroute_deliveries_v3";
 const VIEW_MODE_KEY = "logiroute_viewmode_v1";
@@ -421,9 +426,12 @@ const App: React.FC = () => {
   const deliveriesRef = useRef(deliveries);
   deliveriesRef.current = deliveries;
   const importingDeCAIdsRef = useRef(new Set<string>());
+  const csvImportInProgressRef = useRef(false);
 
   const [manualSequence, setManualSequence] = useState<string[]>([]);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
+  const hydratedUserIdRef = useRef(hydratedUserId);
+  hydratedUserIdRef.current = hydratedUserId;
   const [routeStorageError, setRouteStorageError] = useState<string | null>(null);
   const [kilometrajeInicial, setKilometrajeInicial] = useState("");
   const [kilometrajeFinal, setKilometrajeFinal] = useState("");
@@ -470,12 +478,19 @@ const App: React.FC = () => {
   const [parsingMessage, setParsingMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
+  const isAppClosedRef = useRef(isAppClosed);
+  isAppClosedRef.current = isAppClosed;
   const [isRegistroOpen, setIsRegistroOpen] = useState(false);
   const [isClosingJornada, setIsClosingJornada] = useState(false);
+  const [isCsvImportOpen, setIsCsvImportOpen] = useState(false);
   const isClosingJornadaRef = useRef(false);
   const cloudCloseRef = useRef<(() => Promise<void>) | null>(null);
   const sessionUserRef = useRef<string | null>(null);
   sessionUserRef.current = user?.id ?? null;
+  const routeContextVersionRef = useRef(0);
+  useLayoutEffect(() => {
+    routeContextVersionRef.current += 1;
+  }, [user?.id, hydratedUserId]);
   const [currentUserLoc, setCurrentUserLoc] = useState<
     { latitude: number; longitude: number } | undefined
   >(undefined);
@@ -1207,6 +1222,78 @@ const App: React.FC = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // CSV import handler
+  // ---------------------------------------------------------------------------
+  const handleCsvImport = async (
+    rows: Extract<RouteCsvRow, { kind: "valid" }>[],
+  ) => {
+    if (rows.length === 0) return;
+    if (csvImportInProgressRef.current) {
+      throw new Error("Ya hay una importación CSV en curso.");
+    }
+    const ownerId = sessionUserRef.current;
+    const contextVersion = routeContextVersionRef.current;
+    const isImportContextCurrent = () =>
+      sessionUserRef.current === ownerId &&
+      hydratedUserIdRef.current === ownerId &&
+      routeContextVersionRef.current === contextVersion &&
+      !isClosingJornadaRef.current &&
+      !isAppClosedRef.current;
+    if (
+      !ownerId ||
+      hydratedUserIdRef.current !== ownerId ||
+      !isImportContextCurrent()
+    ) {
+      throw new Error("La sesión o jornada ya no está disponible para importar.");
+    }
+
+    csvImportInProgressRef.current = true;
+    try {
+      const newStops: Delivery[] = [];
+      const geocodingErrors: string[] = [];
+
+      for (const row of rows) {
+        const { geocodeQuery, ...deliveryBase } = row.delivery;
+        let coordinates: [number, number] | undefined;
+
+        if (geocodeQuery) {
+          try {
+            const geocoded = await geocodeAddress(geocodeQuery);
+            if (Number.isFinite(geocoded.lat) && Number.isFinite(geocoded.lng)) {
+              coordinates = [geocoded.lat, geocoded.lng];
+            } else {
+              geocodingErrors.push(`Fila ${row.rowNumber}: no se pudo localizar en el mapa.`);
+            }
+          } catch {
+            geocodingErrors.push(`Fila ${row.rowNumber}: error al geocodificar.`);
+          }
+        }
+
+        newStops.push({ ...deliveryBase, coordinates });
+      }
+
+      if (!isImportContextCurrent()) {
+        throw new Error("La sesión o jornada cambió durante la importación. No se añadieron las paradas.");
+      }
+
+      setDeliveries((prev) => appendImportedRouteStops(prev, newStops));
+
+      if (geocodingErrors.length > 0) {
+        setRouteNotice(
+          `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""}. Sin ubicación en mapa: ${geocodingErrors.length}.`,
+        );
+      } else {
+        setRouteNotice(
+          `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""} correctamente.`,
+        );
+      }
+      setIsCsvImportOpen(false);
+    } finally {
+      csvImportInProgressRef.current = false;
+    }
+  };
+
   const handleStatusChange = (id: string, status: DeliveryStatus) => {
     // Req. reparto: el bloqueo de edición no impide registrar el resultado
     // operativo (Entregado/Incidencia), pero sí impide reabrir la tarea
@@ -1266,6 +1353,7 @@ const App: React.FC = () => {
       return;
     }
     isClosingJornadaRef.current = true;
+    routeContextVersionRef.current += 1;
     setIsClosingJornada(true);
     try { await cloudCloseRef.current(); }
     finally { isClosingJornadaRef.current = false; setIsClosingJornada(false); }
@@ -1673,6 +1761,14 @@ const App: React.FC = () => {
 
               <div className="hidden sm:flex flex-wrap items-center justify-end gap-2">
                 <button
+                  type="button"
+                  onClick={() => setIsCsvImportOpen(true)}
+                  disabled={isAdding || editingDelivery !== null}
+                  className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase disabled:opacity-40 hover:bg-blue-50 transition flex items-center gap-1"
+                >
+                  <FileText size={13} /> Importar CSV
+                </button>
+                <button
                   onClick={openAddDelivery}
                   className="bg-blue-600 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md hover:bg-blue-700 transition"
                 >
@@ -1704,6 +1800,14 @@ const App: React.FC = () => {
 
           {/* barra acciones móvil */}
           <div className="sm:hidden bg-white border-b px-3 py-2 flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setIsCsvImportOpen(true)}
+              disabled={isAdding || editingDelivery !== null}
+              className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase whitespace-nowrap disabled:opacity-40 flex items-center gap-1"
+            >
+              <FileText size={13} /> CSV
+            </button>
             <button
               onClick={openAddDelivery}
               className="bg-blue-600 text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center gap-1 whitespace-nowrap shadow-md"
@@ -1789,6 +1893,7 @@ const App: React.FC = () => {
                   }
                 : { kilometrajeAsociacionPendiente };
               if (!saveRouteSnapshot(ownerId, route.deliveries, route.sequence, odometer)) return false;
+              routeContextVersionRef.current += 1;
               setDeliveries(route.deliveries);
               setManualSequence(route.sequence);
               if (requiresOdometerReview) {
@@ -2021,6 +2126,13 @@ const App: React.FC = () => {
           </main>
 
           {/* Modal Nueva Parada / Editar Parada */}
+          {isCsvImportOpen && (
+            <RouteCsvImportModal
+              onClose={() => setIsCsvImportOpen(false)}
+              onImport={handleCsvImport}
+              disabled={isAdding || editingDelivery !== null}
+            />
+          )}
           {isAdding && (
             <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
               <div className="bg-white rounded-[40px] w-full max-w-xl max-h-[90vh] shadow-2xl overflow-hidden">
