@@ -125,6 +125,7 @@ export interface DeCA {
   pdfSha256?: string | null;
   emissionRequestId?: string | null;
   emissionStartedAt?: string | null;
+  emissionError?: string | null;
   fotoAlbaran?: string;
   nombreFotoAlbaran?: string;
   transportistaNif?: string;

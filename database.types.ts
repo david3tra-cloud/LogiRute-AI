@@ -433,7 +433,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      record_deca_emission_failure: {
+        Args: {
+          p_deca_id: string
+          p_emission_request_id: string
+          p_error_message: string
+        }
+        Returns: Database["public"]["Tables"]["decas"]["Row"][]
+      }
     }
     Enums: {
       [_ in never]: never
