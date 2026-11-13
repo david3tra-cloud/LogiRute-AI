@@ -2,6 +2,7 @@ import type { Database } from "./database.types";
 import { getCurrentUserId } from "./decaSupabaseService";
 import { supabase } from "./lib/supabase";
 import type { TransportistaHabitual } from "./types";
+import { normalizeRecipientText } from "./destinatariosService";
 
 export type TransportistaHabitualRow =
   Database["public"]["Tables"]["transportistas_habituales"]["Row"];
@@ -13,6 +14,8 @@ export type TransportistaHabitualUpdate =
 const COLUMNS =
   "id,user_id,legacy_id,nombre,nif,direccion,ciudad,codigo_postal,provincia,pais,telefono,email,notas,es_predeterminado,created_at,updated_at,deleted_at";
 const REMOTE_ROW_PREFIX = "supabase-row:";
+const normalizeNif = (value: string) =>
+  normalizeRecipientText(value).replace(/\s+/g, "");
 
 const requireUserId = async (): Promise<string> => {
   const userId = await getCurrentUserId();
@@ -177,6 +180,74 @@ export async function listUserTransportistasHabituales(): Promise<
   TransportistaHabitualRow[]
 > {
   return listRowsForUser(await requireUserId());
+}
+
+export async function resolveUserTransportistaHabitualForDeCA(
+  id: string | null | undefined,
+  nif: string | null | undefined,
+  nombre: string | null | undefined,
+): Promise<
+  | {
+      row: TransportistaHabitualRow;
+      profile: TransportistaHabitual;
+    }
+  | undefined
+> {
+  const userId = await requireUserId();
+  const rows = (await listRowsForUser(userId)).filter(
+    (row) => row.deleted_at === null,
+  );
+  const requestedId = id?.trim();
+  const requestedNif = nif?.trim();
+  const requestedName = nombre?.trim();
+
+  let candidates = rows;
+  if (requestedId) {
+    candidates = rows.filter(
+      (row) =>
+        row.id === requestedId ||
+        row.legacy_id === requestedId ||
+        `${REMOTE_ROW_PREFIX}${row.id}` === requestedId,
+    );
+    if (candidates.length === 0) {
+      throw new Error("No se encontró la ficha del transportista indicada por ID.");
+    }
+  } else if (requestedNif) {
+    candidates = rows.filter(
+      (row) => normalizeNif(row.nif) === normalizeNif(requestedNif),
+    );
+    if (candidates.length === 0) {
+      throw new Error("No se encontró la ficha del transportista indicada por NIF.");
+    }
+  } else if (requestedName) {
+    const normalizedName = normalizeRecipientText(requestedName);
+    candidates = rows.filter(
+      (row) => normalizeRecipientText(row.nombre) === normalizedName,
+    );
+    if (candidates.length === 0) return undefined;
+  } else {
+    return undefined;
+  }
+
+  if (candidates.length > 1) {
+    throw new Error(
+      "Hay varias fichas de transportista coincidentes; selecciona una ficha concreta.",
+    );
+  }
+
+  const row = candidates[0];
+  if (
+    (requestedName &&
+      normalizeRecipientText(row.nombre) !==
+        normalizeRecipientText(requestedName)) ||
+    (requestedNif && normalizeNif(row.nif) !== normalizeNif(requestedNif))
+  ) {
+    throw new Error(
+      "El ID, el NIF y el nombre del transportista no corresponden a la misma ficha.",
+    );
+  }
+
+  return { row, profile: mapSupabaseTransportistaHabitualToLocal(row) };
 }
 
 export async function loadUserTransportistasWithTombstones(): Promise<{

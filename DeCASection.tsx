@@ -67,6 +67,10 @@ import {
   type DecaCsvPreview,
 } from "./decaCsvService";
 import {
+  resolveDeCACsvIdentityGroups,
+  resolveDeCACsvRows,
+} from "./decaCsvIdentity";
+import {
   getImageDimensions,
   recognizeDachserRegions,
   type DachserRegionTexts,
@@ -1501,6 +1505,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const [decaCsvPreview, setDecaCsvPreview] = useState<DecaCsvPreview | null>(
     null,
   );
+  const [decaCsvIdentityChoices, setDecaCsvIdentityChoices] = useState<
+    Record<string, string>
+  >({});
   const [decaCsvReadError, setDecaCsvReadError] = useState("");
   const [decaCsvImportMessage, setDecaCsvImportMessage] = useState("");
   const [decaCsvImportError, setDecaCsvImportError] = useState("");
@@ -5069,6 +5076,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     event.target.value = "";
     setDecaCsvImportMessage("");
     setDecaCsvReadError("");
+    setDecaCsvIdentityChoices({});
     if (!file) return;
 
     try {
@@ -5090,10 +5098,24 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const validCsvDecas =
+  const parsedCsvDecas =
     decaCsvPreview?.rows.flatMap((row) =>
       row.deca && !row.reason ? [row.deca] : [],
     ) ?? [];
+  const decaCsvIdentityGroups = decaCsvPreview
+    ? resolveDeCACsvIdentityGroups(
+        decaCsvPreview,
+        companies,
+        transportistas,
+        decaCsvIdentityChoices,
+      )
+    : [];
+  const validCsvDecas = decaCsvPreview
+    ? resolveDeCACsvRows(decaCsvPreview, decaCsvIdentityGroups)
+    : [];
+  const unresolvedCsvIdentityGroups = decaCsvIdentityGroups.filter(
+    (group) => group.status !== "resolved",
+  );
   const invalidCsvRows =
     decaCsvPreview?.rows.filter((row) => Boolean(row.reason)) ?? [];
 
@@ -5417,7 +5439,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     if (
       !decaCsvPreview ||
       decaCsvPreview.headerError ||
-      validCsvDecas.length === 0 ||
+      parsedCsvDecas.length === 0 ||
+      unresolvedCsvIdentityGroups.length > 0 ||
       decaCsvImportInProgressRef.current
     ) {
       return;
@@ -5437,11 +5460,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         return;
       }
 
-      const validRows = decaCsvPreview.rows.flatMap((row) =>
-        row.deca && !row.reason
-          ? [{ rowNumber: row.rowNumber, deca: row.deca }]
-          : [],
+      const resolvedById = new Map(
+        validCsvDecas.map((deca) => [deca.id, deca]),
       );
+      const validRows = decaCsvPreview.rows.flatMap((row) => {
+        if (!row.deca || row.reason) return [];
+        const deca = resolvedById.get(row.deca.id);
+        return deca ? [{ rowNumber: row.rowNumber, deca }] : [];
+      });
       const insertedDecas: DeCA[] = [];
       const failedRows: { rowNumber: number; message: string }[] = [];
 
@@ -6533,6 +6559,150 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                         {decaCsvPreview.headerError}
                       </p>
                     )}
+                    {decaCsvIdentityGroups.length > 0 && (
+                      <section
+                        aria-label="Resolución de fichas de cargadores y transportistas"
+                        className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3"
+                      >
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">
+                            Fichas de cargadores y transportistas
+                          </h3>
+                          <p className="mt-1 text-xs text-slate-600">
+                            Cada selección se aplica a todas las filas del
+                            grupo. Solo se vincula automáticamente una ficha
+                            completa y coincidente de forma única.
+                          </p>
+                        </div>
+                        {decaCsvIdentityGroups.map((group) => {
+                          const label =
+                            group.role === "cargador"
+                              ? "Cargador"
+                              : "Transportista";
+                          const resolvedProfile = group.profile;
+                          const statusMessage =
+                            group.status === "resolved"
+                              ? "Ficha resuelta"
+                              : group.status === "ambiguous"
+                                ? "Hay varias fichas coincidentes. Elige una."
+                                : group.status === "contradictory"
+                                  ? "El ID, el NIF y el nombre apuntan a fichas distintas o incompatibles. Corrige el CSV o la ficha."
+                                  : group.status === "incomplete"
+                                    ? "La ficha coincidente no tiene todos los datos de identificación necesarios."
+                                    : group.status === "needs_selection"
+                                      ? "Selecciona la ficha que debe usarse para estas filas."
+                                      : "No se encontró una ficha coincidente. Crea la ficha guardada o corrige la identidad del CSV.";
+                          return (
+                            <div
+                              key={group.key}
+                              className="space-y-2 rounded-md border border-slate-200 bg-white p-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-semibold text-slate-800">
+                                    {label}: {group.name || "sin nombre"}{" "}
+                                    <span className="font-normal text-slate-500">
+                                      · filas {group.rowNumbers.join(", ")}
+                                    </span>
+                                  </p>
+                                  {(group.profileId || group.nif) && (
+                                    <p className="mt-1 text-xs text-slate-500">
+                                      {group.profileId
+                                        ? `ID CSV: ${group.profileId}`
+                                        : ""}
+                                      {group.profileId && group.nif ? " · " : ""}
+                                      {group.nif ? `NIF CSV: ${group.nif}` : ""}
+                                    </p>
+                                  )}
+                                </div>
+                                {group.status === "resolved" &&
+                                  resolvedProfile && (
+                                    <span className="text-xs font-bold text-emerald-700">
+                                      {resolvedProfile.nombre} · NIF{" "}
+                                      {resolvedProfile.nif}
+                                    </span>
+                                  )}
+                              </div>
+                              {group.status !== "resolved" && (
+                                <>
+                                  <p
+                                    role={
+                                      group.status === "contradictory"
+                                        ? "alert"
+                                        : "status"
+                                    }
+                                    className={`text-xs ${
+                                      group.status === "contradictory"
+                                        ? "text-red-700"
+                                        : "text-amber-800"
+                                    }`}
+                                  >
+                                    {statusMessage}
+                                  </p>
+                                  {group.selectableCandidates.length > 0 && (
+                                    <label className="block">
+                                      <span className="sr-only">
+                                        Elegir ficha de {label.toLocaleLowerCase(
+                                          "es-ES",
+                                        )}
+                                      </span>
+                                      <select
+                                        value={
+                                          decaCsvIdentityChoices[group.key] ?? ""
+                                        }
+                                        onChange={(event) =>
+                                          setDecaCsvIdentityChoices(
+                                            (current) => ({
+                                              ...current,
+                                              [group.key]: event.target.value,
+                                            }),
+                                          )
+                                        }
+                                        className="min-h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                                      >
+                                        <option value="">
+                                          {group.status === "ambiguous"
+                                            ? "Selecciona una ficha"
+                                            : "Selecciona la ficha"}
+                                        </option>
+                                        {group.selectableCandidates.map(
+                                          (candidate) => (
+                                            <option
+                                              key={candidate.id}
+                                              value={candidate.id}
+                                            >
+                                              {candidate.nombre} · NIF{" "}
+                                              {candidate.nif} ·{" "}
+                                              {candidate.direccion},{" "}
+                                              {candidate.ciudad}
+                                            </option>
+                                          ),
+                                        )}
+                                      </select>
+                                    </label>
+                                  )}
+                                  {group.status !== "contradictory" && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        group.role === "cargador"
+                                          ? openCompanyManager("create")
+                                          : openTransportistaManager()
+                                      }
+                                      className="min-h-9 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                                    >
+                                      {group.role === "cargador"
+                                        ? "Abrir fichas de cargadores"
+                                        : "Abrir fichas de transportistas"}
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </section>
+                    )}
                     {validCsvDecas.length > 0 && (
                       <div className="overflow-x-auto">
                         <p className="mb-1 text-sm font-bold text-slate-800">
@@ -6618,6 +6788,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       decaCsvImporting ||
                       !decaCsvPreview ||
                       Boolean(decaCsvPreview.headerError) ||
+                      unresolvedCsvIdentityGroups.length > 0 ||
                       validCsvDecas.length === 0
                     }
                     className="min-h-10 rounded-lg bg-blue-700 px-3 py-2 text-sm font-bold text-white disabled:opacity-50"

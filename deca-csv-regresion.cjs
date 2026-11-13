@@ -58,10 +58,27 @@ function loadTsModule(relativePath, customMocks = {}) {
 }
 
 const decaCsvService = loadTsModule("decaCsvService.ts");
-const decaSupabaseService = loadTsModule("decaSupabaseService.ts");
+const decaSupabaseService = loadTsModule("decaSupabaseService.ts", {
+  "./transportistasHabitualesSupabaseService": {
+    resolveUserTransportistaHabitualForDeCA: async () => undefined,
+  },
+});
 
 const { previewDecasCsv, decaTemplateCsv, DECA_CSV_HEADERS, REQUIRED_DECA_CSV_HEADERS, OPTIONAL_DECA_CSV_HEADERS } = decaCsvService;
 const { mapSupabaseDecaToLocal } = decaSupabaseService;
+const decaCsvIdentity = loadTsModule("decaCsvIdentity.ts", {
+  "./decaCsvService": decaCsvService,
+  "./destinatariosService": {
+    normalizeRecipientText: (value) =>
+      value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLocaleLowerCase("es-ES")
+        .replace(/\s+/g, " ")
+        .trim(),
+  },
+  "./types": {},
+});
 
 console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n");
 
@@ -274,6 +291,7 @@ console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n
     destinatario_codigo_postal: localDeca.destinatarioCodigoPostal,
     destinatario_pais: localDeca.destinatarioPais,
     transportista: localDeca.transportista,
+    transportista_habitual_id: "carrier-uuid",
     transportista_nif: null,
     transportista_direccion: null,
     transportista_ciudad: null,
@@ -341,10 +359,212 @@ console.log("Iniciando pruebas de regresión para importación CSV de DeCAs...\n
     console.log("PASS 11: valores informados inválidos de bultos/peso se rechazan.");
   }
   assert.equal(mappedBack.transportista, localDeca.transportista);
+  assert.equal(mappedBack.transportistaId, "carrier-uuid");
   assert.equal(mappedBack.matriculaVehiculo, localDeca.matriculaVehiculo);
   assert.equal(mappedBack.referenciaAlbaran, localDeca.referenciaAlbaran);
   console.log("PASS 8: Mapeo bidireccional DeCA <-> Supabase DecaRow verificado para todos los nuevos campos.");
 }
 
-console.log("\nTodas las pruebas de regresión de CSV pasaron satisfactoriamente (11/11).");
+// 12. Identidades opcionales y resolución por grupo con ficha completa
+{
+  const identityCsv = [
+    "fecha;cargador;cargador_id;cargador_nif;destinatario;ciudad_destino;mercancia;transportista;transportista_id;transportista_nif",
+    "2026-10-30;Cargador Ágil;loader-1;L-111;Destino 1;Valencia;Cajas;Transporte Norte;carrier-1;T-111",
+    "2026-10-31;CARGADOR AGIL;loader-1;L-111;Destino 2;Madrid;Palets;Transporte Norte;carrier-1;T-111",
+  ].join("\r\n");
+  const preview = previewDecasCsv(identityCsv);
+  assert.equal(preview.headerError, undefined);
+  assert.equal(preview.rows[0].deca.cargadorId, "loader-1");
+  assert.equal(preview.rows[0].deca.transportistaNif, "T-111");
 
+  const company = {
+    id: "loader-1",
+    nombre: "Cargador Ágil",
+    nif: "L-111",
+    direccion: "Calle Uno 1",
+    ciudad: "Valencia",
+    codigoPostal: "46001",
+  };
+  const carrier = {
+    id: "carrier-1",
+    nombre: "Transporte Norte",
+    nif: "T-111",
+    direccion: "Avenida Dos 2",
+    ciudad: "Madrid",
+    codigoPostal: "28001",
+    provincia: "Madrid",
+    pais: "España",
+    telefono: "600000001",
+    email: "info@example.test",
+    notas: "Ficha completa",
+  };
+  const groups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    preview,
+    [company],
+    [carrier],
+  );
+  assert.equal(groups.length, 2, "Las identidades repetidas se agrupan.");
+  assert.ok(groups.every((group) => group.status === "resolved"));
+  const resolvedRows = decaCsvIdentity.resolveDeCACsvRows(preview, groups);
+  assert.equal(resolvedRows.length, 2);
+  assert.equal(resolvedRows[0].cargadorId, company.id);
+  assert.equal(resolvedRows[1].cargadorNif, company.nif);
+  assert.equal(resolvedRows[0].transportistaId, carrier.id);
+  assert.equal(resolvedRows[0].transportistaDireccion, carrier.direccion);
+  assert.equal(resolvedRows[1].transportistaEmail, carrier.email);
+  console.log("PASS 12: una resolución por grupo completa las filas con ficha e identificación.");
+
+  const currentTemplatePreview = previewDecasCsv(decaTemplateCsv());
+  const currentTemplateGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    currentTemplatePreview,
+    [{
+      ...company,
+      id: "template-loader",
+      nombre: "Empresa Ejemplo S.L.",
+      nif: "E-111",
+    }],
+    [{
+      ...carrier,
+      id: "template-carrier",
+      nombre: "Transportes Rápidos S.A.",
+      nif: "TR-111",
+    }],
+  );
+  const currentTemplateRows = decaCsvIdentity.resolveDeCACsvRows(
+    currentTemplatePreview,
+    currentTemplateGroups,
+  );
+  assert.equal(currentTemplateRows.length, 1);
+  assert.equal(currentTemplateRows[0].cargadorId, "template-loader");
+  assert.equal(currentTemplateRows[0].transportistaId, "template-carrier");
+  console.log("PASS: la plantilla CSV actual se resuelve por nombre único sin columnas nuevas.");
+
+  const ambiguousPreview = previewDecasCsv(
+    [
+      "fecha;cargador;destinatario;ciudad_destino;mercancia;transportista",
+      "2026-10-30;Cargador;Destino;Valencia;Cajas;Transporte",
+    ].join("\r\n"),
+  );
+  const duplicateCarriers = [
+    { ...carrier, id: "carrier-a", nombre: "Transporte" },
+    { ...carrier, id: "carrier-b", nombre: "Transporte", nif: "T-222" },
+  ];
+  const ambiguousGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    ambiguousPreview,
+    [{ ...company, nombre: "Cargador" }],
+    duplicateCarriers,
+  );
+  const ambiguousGroup = ambiguousGroups.find(
+    (group) => group.role === "transportista",
+  );
+  assert.equal(ambiguousGroup.status, "ambiguous");
+  assert.equal(
+    decaCsvIdentity.resolveDeCACsvRows(ambiguousPreview, ambiguousGroups).length,
+    0,
+    "La coincidencia múltiple no debe elegir una ficha.",
+  );
+  const selectedGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    ambiguousPreview,
+    [{ ...company, nombre: "Cargador" }],
+    duplicateCarriers,
+    { [ambiguousGroup.key]: "carrier-b" },
+  );
+  const selectedRows = decaCsvIdentity.resolveDeCACsvRows(
+    ambiguousPreview,
+    selectedGroups,
+  );
+  assert.equal(selectedRows.length, 1);
+  assert.equal(selectedRows[0].transportistaId, "carrier-b");
+  console.log("PASS 13: grupo ambiguo requiere selección explícita y se resuelve en todas sus filas.");
+
+  const contradictoryPreview = previewDecasCsv(
+    [
+      "fecha;cargador;cargador_id;cargador_nif;destinatario;ciudad_destino;mercancia;transportista",
+      "2026-10-30;Cargador;loader-a;L-222;Destino;Valencia;Cajas;Transporte",
+    ].join("\r\n"),
+  );
+  const contradictoryGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    contradictoryPreview,
+    [
+      { ...company, id: "loader-a", nombre: "Cargador", nif: "L-111" },
+    ],
+    [{ ...carrier, nombre: "Transporte" }],
+  );
+  assert.equal(
+    contradictoryGroups.find((group) => group.role === "cargador").status,
+    "contradictory",
+  );
+  console.log("PASS 14: contradicción entre ID y NIF se bloquea sin sobrescribir.");
+
+  const incompleteGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    ambiguousPreview,
+    [{ ...company, nombre: "Cargador" }],
+    [{ ...carrier, nombre: "Transporte", codigoPostal: "" }],
+  );
+  assert.equal(
+    incompleteGroups.find((group) => group.role === "transportista").status,
+    "incomplete",
+  );
+  assert.equal(
+    decaCsvIdentity.resolveDeCACsvRows(ambiguousPreview, incompleteGroups).length,
+    0,
+  );
+  console.log("PASS: ficha coincidente incompleta no se importa como identificación completa.");
+
+  const optionalCarrierPreview = previewDecasCsv(
+    [
+      "fecha;cargador;destinatario;ciudad_destino;mercancia",
+      "2026-10-30;Cargador;Destino;Valencia;Cajas",
+    ].join("\r\n"),
+  );
+  const optionalCarrierGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+    optionalCarrierPreview,
+    [{ ...company, nombre: "Cargador" }],
+    [],
+  );
+  assert.equal(optionalCarrierGroups.length, 1);
+  assert.equal(optionalCarrierGroups[0].role, "cargador");
+  const optionalCarrierRows = decaCsvIdentity.resolveDeCACsvRows(
+    optionalCarrierPreview,
+    optionalCarrierGroups,
+  );
+  assert.equal(optionalCarrierRows.length, 1);
+  assert.equal(optionalCarrierRows[0].transportista, "");
+  assert.equal(optionalCarrierRows[0].transportistaId, undefined);
+  assert.equal(optionalCarrierRows[0].transportistaNif, undefined);
+  console.log("PASS: un borrador sin nombre, ID ni NIF de transportista se importa sin asociar una ficha.");
+
+  for (const [header, value] of [
+    ["transportista", "Transporte"],
+    ["transportista_id", "carrier-1"],
+    ["transportista_nif", "T-111"],
+  ]) {
+    const identifiedCarrierPreview = previewDecasCsv(
+      [
+        `fecha;cargador;destinatario;ciudad_destino;mercancia;${header}`,
+        `2026-10-30;Cargador;Destino;Valencia;Cajas;${value}`,
+      ].join("\r\n"),
+    );
+    const identifiedCarrierGroups = decaCsvIdentity.resolveDeCACsvIdentityGroups(
+      identifiedCarrierPreview,
+      [{ ...company, nombre: "Cargador" }],
+      [],
+    );
+    assert.equal(
+      identifiedCarrierGroups.find((group) => group.role === "transportista")
+        .status,
+      "missing",
+      `Una identidad de transportista informada (${header}) debe seguir requiriendo ficha.`,
+    );
+    assert.equal(
+      decaCsvIdentity.resolveDeCACsvRows(
+        identifiedCarrierPreview,
+        identifiedCarrierGroups,
+      ).length,
+      0,
+    );
+  }
+  console.log("PASS: nombre, ID o NIF informados conservan la resolución obligatoria del transportista.");
+}
+
+console.log("\nTodas las pruebas de regresión de CSV pasaron satisfactoriamente.");
