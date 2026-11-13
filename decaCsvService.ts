@@ -19,6 +19,10 @@ export const OPTIONAL_DECA_CSV_HEADERS = [
   "bultos",
   "peso_kg",
   "transportista",
+  "cargador_id",
+  "cargador_nif",
+  "transportista_id",
+  "transportista_nif",
   "matricula",
   "referencia_albaran",
 ] as const;
@@ -147,6 +151,10 @@ export const previewDecasCsv = (
       const destinatarioCodigoPostal = getVal("destinatario_codigo_postal");
       const destinatarioPais = getVal("destinatario_pais");
       const transportista = getVal("transportista");
+      const cargadorId = getVal("cargador_id");
+      const cargadorNif = getVal("cargador_nif");
+      const transportistaId = getVal("transportista_id");
+      const transportistaNif = getVal("transportista_nif");
       const matriculaVehiculo = getVal("matricula");
       const referenciaAlbaran = getVal("referencia_albaran");
 
@@ -189,7 +197,11 @@ export const previewDecasCsv = (
         id: createUniqueDecaId(index),
         fecha,
         cargador,
+        cargadorId: cargadorId || undefined,
+        cargadorNif: cargadorNif || undefined,
         transportista,
+        transportistaId: transportistaId || undefined,
+        transportistaNif: transportistaNif || undefined,
         destinatario,
         direccionDestino,
         ciudadDestino,

@@ -1,6 +1,7 @@
 import type { DeCA } from "./types";
 import { supabase, supabaseStorageUrl } from "./lib/supabase";
 import { loadUserEmpresaHabitualForDeCA } from "./empresasHabitualesSupabaseService";
+import { resolveUserTransportistaHabitualForDeCA } from "./transportistasHabitualesSupabaseService";
 
 export type DecaRow = {
   id: string;
@@ -16,6 +17,7 @@ export type DecaRow = {
   destinatario_codigo_postal: string | null;
   destinatario_pais: string | null;
   transportista: string | null;
+  transportista_habitual_id: string | null;
   transportista_nif: string | null;
   transportista_direccion: string | null;
   transportista_ciudad: string | null;
@@ -43,6 +45,7 @@ export type DecaRow = {
   pdf_sha256: string | null;
   emission_request_id: string | null;
   emission_started_at: string | null;
+  emission_error: string | null;
 };
 
 type DecaEmissionMetadata =
@@ -52,7 +55,8 @@ type DecaEmissionMetadata =
   | "pdf_version"
   | "pdf_sha256"
   | "emission_request_id"
-  | "emission_started_at";
+  | "emission_started_at"
+  | "emission_error";
 
 export type DecaInsert = Omit<
   DecaRow,
@@ -85,7 +89,7 @@ export type FinalizeDecaEmissionInput = {
 };
 
 const DECA_COLUMNS =
-  "id,user_id,deleted_at,estado,fecha,empresa_habitual_id,cargador,cargador_nif,destinatario,destinatario_nif,destinatario_codigo_postal,destinatario_pais,transportista,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at";
+  "id,user_id,deleted_at,estado,fecha,empresa_habitual_id,cargador,cargador_nif,destinatario,destinatario_nif,destinatario_codigo_postal,destinatario_pais,transportista,transportista_habitual_id,transportista_nif,transportista_direccion,transportista_ciudad,transportista_codigo_postal,transportista_provincia,transportista_pais,transportista_telefono,transportista_email,transportista_notas,mercancia,bultos,peso_bruto,matricula,origen,destino,ciudad_destino,referencia_albaran,observaciones,created_at,updated_at,emitted_at,pdf_path,pdf_public_url,pdf_version,pdf_sha256,emission_request_id,emission_started_at,emission_error";
 
 const DECA_PDF_BUCKET = "deca-pdf";
 
@@ -299,27 +303,50 @@ export async function insertUserDeca(deca: DeCA): Promise<DecaRow> {
     deca.cargadorNif,
     deca.cargador,
   );
+  const transportista = await resolveUserTransportistaHabitualForDeCA(
+    deca.transportistaId,
+    deca.transportistaNif,
+    deca.transportista,
+  );
   const payload: DecaInsert = {
     user_id: userId,
     estado: mapLocalDecaStatusToSupabase(deca.estado),
     fecha: nullableText(deca.fecha),
     empresa_habitual_id: cargador?.id ?? null,
     cargador: nullableText(deca.cargador),
-    cargador_nif: nullableText(deca.cargadorNif),
+    cargador_nif: nullableText(deca.cargadorNif ?? cargador?.nif),
     destinatario: nullableText(deca.destinatario),
     destinatario_nif: nullableText(deca.destinatarioNif),
     destinatario_codigo_postal: nullableText(deca.destinatarioCodigoPostal),
     destinatario_pais: nullableText(deca.destinatarioPais),
-    transportista: nullableText(deca.transportista),
-    transportista_nif: nullableText(deca.transportistaNif),
-    transportista_direccion: nullableText(deca.transportistaDireccion),
-    transportista_ciudad: nullableText(deca.transportistaCiudad),
-    transportista_codigo_postal: nullableText(deca.transportistaCodigoPostal),
-    transportista_provincia: nullableText(deca.transportistaProvincia),
-    transportista_pais: nullableText(deca.transportistaPais),
-    transportista_telefono: nullableText(deca.transportistaTelefono),
-    transportista_email: nullableText(deca.transportistaEmail),
-    transportista_notas: nullableText(deca.transportistaNotas),
+    transportista: nullableText(deca.transportista ?? transportista?.profile.nombre),
+    transportista_habitual_id: transportista?.row.id ?? null,
+    transportista_nif: nullableText(deca.transportistaNif ?? transportista?.profile.nif),
+    transportista_direccion: nullableText(
+      deca.transportistaDireccion ?? transportista?.profile.direccion,
+    ),
+    transportista_ciudad: nullableText(
+      deca.transportistaCiudad ?? transportista?.profile.ciudad,
+    ),
+    transportista_codigo_postal: nullableText(
+      deca.transportistaCodigoPostal ?? transportista?.profile.codigoPostal,
+    ),
+    transportista_provincia: nullableText(
+      deca.transportistaProvincia ?? transportista?.profile.provincia,
+    ),
+    transportista_pais: nullableText(
+      deca.transportistaPais ?? transportista?.profile.pais,
+    ),
+    transportista_telefono: nullableText(
+      deca.transportistaTelefono ?? transportista?.profile.telefono,
+    ),
+    transportista_email: nullableText(
+      deca.transportistaEmail ?? transportista?.profile.email,
+    ),
+    transportista_notas: nullableText(
+      deca.transportistaNotas ?? transportista?.profile.notas,
+    ),
+    emission_error: null,
     mercancia: nullableText(deca.mercancia),
     bultos: nullableInteger(deca.numeroBultos, "número de bultos"),
     peso_bruto: nullableNumber(deca.pesoKg, "peso bruto"),
@@ -630,6 +657,7 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
     cargador: row.cargador ?? "",
     cargadorNif: row.cargador_nif ?? undefined,
     transportista: row.transportista ?? "",
+    transportistaId: row.transportista_habitual_id ?? undefined,
     destinatario: row.destinatario ?? "",
     destinatarioNif: row.destinatario_nif ?? undefined,
     destinatarioCodigoPostal: row.destinatario_codigo_postal ?? undefined,

@@ -61,6 +61,7 @@ export type Database = {
           destinatario_pais: string | null
           destino: string | null
           emitted_at: string | null
+          emission_error: string | null
           empresa_habitual_id: string | null
           estado: string
           id: string
@@ -70,6 +71,7 @@ export type Database = {
           origen: string | null
           peso_bruto: number | null
           transportista: string | null
+          transportista_habitual_id: string | null
           transportista_nif: string | null
           updated_at: string
           user_id: string
@@ -85,6 +87,7 @@ export type Database = {
           destinatario_pais?: string | null
           destino?: string | null
           emitted_at?: string | null
+          emission_error?: string | null
           empresa_habitual_id?: string | null
           estado?: string
           id?: string
@@ -94,6 +97,7 @@ export type Database = {
           origen?: string | null
           peso_bruto?: number | null
           transportista?: string | null
+          transportista_habitual_id?: string | null
           transportista_nif?: string | null
           updated_at?: string
           user_id: string
@@ -109,6 +113,7 @@ export type Database = {
           destinatario_pais?: string | null
           destino?: string | null
           emitted_at?: string | null
+          emission_error?: string | null
           empresa_habitual_id?: string | null
           estado?: string
           id?: string
@@ -118,6 +123,7 @@ export type Database = {
           origen?: string | null
           peso_bruto?: number | null
           transportista?: string | null
+          transportista_habitual_id?: string | null
           transportista_nif?: string | null
           updated_at?: string
           user_id?: string
@@ -129,6 +135,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "empresas_habituales"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "decas_transportista_habitual_owner_fkey"
+            columns: ["user_id", "transportista_habitual_id"]
+            isOneToOne: false
+            referencedRelation: "transportistas_habituales"
+            referencedColumns: ["user_id", "id"]
           },
           {
             foreignKeyName: "decas_user_id_fkey"

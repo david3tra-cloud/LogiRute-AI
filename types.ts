@@ -101,6 +101,7 @@ export interface DeCA {
   cargadorId?: string;
   cargadorNif?: string;
   transportista: string;
+  transportistaId?: string;
   destinatario: string;
   destinatarioNif?: string;
   destinatarioCodigoPostal?: string;
