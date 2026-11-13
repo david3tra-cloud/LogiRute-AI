@@ -13,6 +13,8 @@
     "test:registro": "node registro-regresion.cjs",
     "test:kilometraje-facturacion": "node kilometraje-facturacion-regresion.cjs",
     "test:deca-csv": "node deca-csv-regresion.cjs",
+    "test:deca-emission-batch": "node deca-emission-batch-regression.cjs && node deca-emission-workflow-regression.cjs",
+    "test:deca-emission-failure-rpc": "node deca-emission-failure-rpc-regression.cjs",
     "test:route-csv": "node route-csv-regresion.cjs",
     "test:deca-deletion": "node deca-deletion-regresion.cjs"
   },

@@ -150,6 +150,15 @@ export default function DeCAListCard({
         </dl>
       </div>
 
+      {deca.emissionError && deca.estado !== "EMITIDO" && (
+        <p
+          role="alert"
+          className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"
+        >
+          Fallo de emisión: {deca.emissionError}
+        </p>
+      )}
+
       <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
         {canShowQr && (
           <button

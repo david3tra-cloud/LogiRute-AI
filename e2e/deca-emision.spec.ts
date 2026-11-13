@@ -32,17 +32,34 @@ test.describe("Emisión oficial DeCA en staging", () => {
     await signIn(page);
   });
 
-  test("reserva un borrador y lo deja en EMITIENDO", async ({ page }) => {
+  test("emite un borrador por completo en una sola acción", async ({ page }) => {
+    test.setTimeout(90_000);
     const deca = await createDraft(page);
-    const reservation = await reserveDraft(page, deca.marker);
+    await openDeCA(page, deca.marker);
+    page.once("dialog", (dialog) => void dialog.accept());
+
+    const reservationResponse = page.waitForResponse(
+      (response) => isReservationRequest(response.request()) && response.ok(),
+    );
+    const finalizeResponse = page.waitForResponse(
+      (response) => isFinalizeRequest(response.request()) && response.ok(),
+      { timeout: 60_000 },
+    );
+    await page.getByRole("button", { name: "Emitir DeCA" }).click();
+    const reservation = await responseRow(await reservationResponse);
+    const emitted = await responseRow(await finalizeResponse);
 
     expect(reservation.estado).toBe("EMITIENDO");
     expect(reservation.emission_request_id).toBeTruthy();
     expect(reservation.emission_started_at).toBeTruthy();
-    await expect(page.getByRole("button", { name: "Finalizar emisión" })).toBeVisible();
+    expect(emitted.estado).toBe("EMITIDO");
+    expect(emitted.pdf_public_url).toMatch(/^https:\/\//);
+    expect(emitted.pdf_sha256).toMatch(/^[a-f0-9]{64}$/i);
+    await expect(page.getByRole("button", { name: "Abrir PDF oficial" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Finalizar emisión" })).toHaveCount(0);
   });
 
-  test("reintenta la reserva y verifica estado, PDF y SHA-256", async ({
+  test.skip("flujo antiguo de finalización manual; cubierto por regresión local", async ({
     page,
     context,
   }) => {
@@ -208,7 +225,7 @@ test.describe("Emisión oficial DeCA en staging", () => {
     async () => {},
   );
 
-  test("rechaza URL oficial con host o bucket incorrectos", async ({ page }) => {
+  test.skip("flujo antiguo de finalización manual con URL inválida", async ({ page }) => {
     for (const corruption of ["host", "bucket"] as const) {
       const deca = await createDraft(page);
       await reserveDraft(page, deca.marker);
@@ -232,7 +249,7 @@ test.describe("Emisión oficial DeCA en staging", () => {
     }
   });
 
-  test("dos pestañas finalizan concurrentemente la misma reserva", async ({
+  test.skip("flujo antiguo de finalización concurrente manual", async ({
     page,
     context,
   }) => {

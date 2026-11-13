@@ -580,6 +580,7 @@ export async function finalizeUserDecaEmission(
       pdf_public_url: input.location.publicUrl,
       pdf_version: 1,
       pdf_sha256: input.pdfSha256,
+      emission_error: null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", input.decaId)
@@ -617,6 +618,7 @@ export async function reserveUserDecaEmission(
       estado: "EMITIENDO",
       emission_request_id: randomUUID.call(globalThis.crypto),
       emission_started_at: new Date().toISOString(),
+      emission_error: null,
     })
     .eq("id", decaId)
     .eq("user_id", userId)
@@ -629,6 +631,77 @@ export async function reserveUserDecaEmission(
   if (error) {
     return throwSupabaseError(
       "No se pudo reservar la emisión del DeCA",
+      error.message,
+    );
+  }
+  return data;
+}
+
+export async function recordUserDecaEmissionFailure(input: {
+  decaId: string;
+  emissionRequestId?: string;
+  message: string;
+  returnToDraft: boolean;
+}): Promise<DecaRow | null> {
+  const message = input.message.trim().slice(0, 2000);
+  if (!message) {
+    throw new Error("El motivo del fallo de emisión no puede estar vacío.");
+  }
+
+  if (input.returnToDraft) {
+    if (!input.emissionRequestId?.trim()) {
+      throw new Error(
+        "No se puede liberar una reserva sin el identificador de solicitud.",
+      );
+    }
+    validateDeCAPdfPathSegment(input.decaId, "del DeCA");
+    validateDeCAPdfPathSegment(
+      input.emissionRequestId,
+      "de reserva de emisión",
+    );
+    const { data, error } = await supabase
+      .rpc("record_deca_emission_failure", {
+        p_deca_id: input.decaId,
+        p_emission_request_id: input.emissionRequestId,
+        p_error_message: message,
+      })
+      .maybeSingle()
+      .returns<DecaRow>();
+    if (error) {
+      return throwSupabaseError(
+        "No se pudo registrar el fallo ni liberar la reserva del DeCA",
+        error.message,
+      );
+    }
+    return data;
+  }
+
+  const userId = await requireCurrentUserId();
+  let query = supabase
+    .from("decas")
+    .update({
+      emission_error: message,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", input.decaId)
+    .eq("user_id", userId)
+    .is("deleted_at", null);
+
+  if (input.emissionRequestId) {
+    query = query
+      .eq("estado", "EMITIENDO")
+      .eq("emission_request_id", input.emissionRequestId);
+  } else {
+    query = query.eq("estado", "BORRADOR");
+  }
+
+  const { data, error } = await query
+    .select(DECA_COLUMNS)
+    .maybeSingle()
+    .returns<DecaRow>();
+  if (error) {
+    return throwSupabaseError(
+      "No se pudo registrar el fallo de emisión del DeCA",
       error.message,
     );
   }
@@ -680,6 +753,7 @@ export function mapSupabaseDecaToLocal(row: DecaRow): DeCA {
     pdfSha256: row.pdf_sha256 ?? undefined,
     emissionRequestId: row.emission_request_id ?? undefined,
     emissionStartedAt: row.emission_started_at ?? undefined,
+    emissionError: row.emission_error ?? undefined,
     transportistaNif: row.transportista_nif ?? undefined,
     transportistaDireccion: row.transportista_direccion ?? undefined,
     transportistaCiudad: row.transportista_ciudad ?? undefined,

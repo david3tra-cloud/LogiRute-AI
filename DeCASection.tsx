@@ -96,6 +96,7 @@ import {
   insertUserDeca,
   listUserDecas,
   mapSupabaseDecaToLocal,
+  recordUserDecaEmissionFailure,
   reserveUserDecaEmission,
   uploadOfficialDeCAPdf,
   updateUserDeca,
@@ -113,6 +114,13 @@ import {
   prepareAndReserveDeCA,
 } from "./decaEmissionPreparation";
 import { validateDeCAForEmission } from "./decaEmissionValidation";
+import {
+  DeCAEmissionBatchGate,
+  runDeCAEmissionBatch,
+  selectDeCADrafts,
+  type DeCAEmissionOutcome,
+} from "./decaEmissionBatch";
+import { emitDeCA } from "./decaEmissionWorkflow";
 
 const STORAGE_KEY = "transport_app_decas";
 
@@ -189,7 +197,12 @@ type DocumentAction =
   | "uploading"
   | "success"
   | "error";
-type EmissionAction = "idle" | "reserving" | "finalizing" | "success" | "error";
+type EmissionAction =
+  | "idle"
+  | "reserving"
+  | "finalizing"
+  | "success"
+  | "error";
 
 type DeCAForm = Pick<
   DeCA,
@@ -1570,6 +1583,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const emissionReservationGateRef = useRef(new EmissionReservationGate());
+  const recoveredEmissionIdsRef = useRef(new Set<string>());
+  const bulkEmissionGateRef = useRef(new DeCAEmissionBatchGate());
+  const [bulkEmissionBusy, setBulkEmissionBusy] = useState(false);
+  const [bulkEmissionMessage, setBulkEmissionMessage] = useState("");
   const [selectedDecaIds, setSelectedDecaIds] = useState<Set<string>>(
     new Set(),
   );
@@ -1600,6 +1617,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       emissionReservationGateRef.current.invalidate();
       setEmissionAction("idle");
       setEmissionMessage("");
+      setBulkEmissionMessage("");
+      recoveredEmissionIdsRef.current.clear();
       bulkGenerationRef.current += 1;
       setSelectedDecaIds(new Set());
       setBulkSummary(null);
@@ -1820,7 +1839,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   }, []);
 
   useEffect(() => {
-    emissionReservationGateRef.current.invalidate();
+    if (!bulkEmissionGateRef.current.isLocked)
+      emissionReservationGateRef.current.invalidate();
     setDocumentAction("idle");
     setDocumentMessage("");
     setEmissionAction("idle");
@@ -3256,6 +3276,95 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       return merged;
     });
   };
+
+  const processDeCAEmission = async (
+    decaId: string,
+    quiet = false,
+  ): Promise<DeCAEmissionOutcome> => {
+    recoveredEmissionIdsRef.current.add(decaId);
+    const result = await emitDeCA(decaId, {
+      expectedUserId: sessionUserIdRef.current,
+      gate: emissionReservationGateRef.current,
+      getCurrentUserId,
+      readRemoteDeCA: getUserDecaById,
+      resolveCarrier: (row) => {
+        const deca = mapSupabaseDecaToLocal(row);
+        return loadUserEmpresaHabitualForDeCA(
+          deca.cargadorId,
+          deca.cargadorNif,
+          deca.cargador,
+        );
+      },
+      resolveRecipient: (row) => {
+        const deca = mapSupabaseDecaToLocal(row);
+        return loadUserEmpresaHabitualForDeCA(
+          undefined,
+          deca.destinatarioNif,
+          deca.destinatario,
+        );
+      },
+      validate: validateDeCAForEmission,
+      reserve: reserveUserDecaEmission,
+      getPdfLocation: getOfficialDeCAPdfLocation,
+      generatePdf: generateOfficialDeCAPdf,
+      calculateSha256: calculateBlobSha256,
+      uploadPdf: uploadOfficialDeCAPdf,
+      finalize: finalizeUserDecaEmission,
+      recordFailure: recordUserDecaEmissionFailure,
+      mapToLocal: mapSupabaseDecaToLocal,
+      isCurrent: (lease, userId) =>
+        mountedRef.current &&
+        emissionReservationGateRef.current.isCurrent(lease) &&
+        sessionUserIdRef.current === userId,
+    });
+
+    if (result.row) integrateRemoteDeCA(result.row);
+    if (!quiet && selectedIdRef.current === decaId) {
+      setEmissionAction(result.status === "emitted" ? "success" : "error");
+      setEmissionMessage(result.message);
+    }
+    return result;
+  };
+
+  const handleEmitSelectedDeCA = async () => {
+    if (
+      !selectedDeCA ||
+      (!isSelectedDeCADraft && selectedDeCA.estado !== "EMITIENDO") ||
+      bulkEmissionGateRef.current.isLocked ||
+      emissionAction === "reserving"
+    ) {
+      return;
+    }
+    const deca = selectedDeCA;
+    if (
+      !window.confirm(
+        deca.estado === "EMITIENDO"
+          ? "¿Reanudar la emisión pendiente? Se comprobará primero el estado remoto para evitar duplicados."
+          : "¿Emitir este DeCA ahora? Se reservará, generará y subirá el PDF oficial en una sola acción.",
+      )
+    ) {
+      return;
+    }
+    setEmissionAction("reserving");
+    setEmissionMessage("");
+    await processDeCAEmission(deca.id);
+  };
+
+  useEffect(() => {
+    if (remoteLoading || remoteError) return;
+    const pending = decas.filter(
+      (deca) =>
+        deca.estado === "EMITIENDO" &&
+        !recoveredEmissionIdsRef.current.has(deca.id),
+    );
+    for (const deca of pending) {
+      recoveredEmissionIdsRef.current.add(deca.id);
+    }
+    void runDeCAEmissionBatch(
+      pending.map((deca) => deca.id),
+      (id) => processDeCAEmission(id, true),
+    );
+  }, [decas, remoteLoading, remoteError]);
 
   const reserveSelectedDeCAEmission = async () => {
     if (!selectedDeCA || !isSelectedDeCADraft || emissionAction === "reserving")
@@ -4760,7 +4869,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   });
 
   const handleDelete = async () => {
-    if (remoteLoading || !selectedDeCA || bulkLockRef.current) return;
+    if (
+      remoteLoading ||
+      !selectedDeCA ||
+      bulkLockRef.current ||
+      bulkEmissionGateRef.current.isLocked
+    )
+      return;
 
     const deca = selectedDeCA;
     if (deca.estado === "EMITIENDO") {
@@ -4802,8 +4917,72 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
   };
 
+  const getSelectedDrafts = (): DeCA[] =>
+      selectDeCADrafts(decas, selectedDecaIds);
+
+  const handleBulkEmission = async () => {
+      const gate = bulkEmissionGateRef.current;
+      if (gate.isLocked) return;
+      const drafts = getSelectedDrafts();
+      if (drafts.length === 0) {
+        setBulkEmissionMessage(
+          "Selecciona uno o varios DeCAs en estado BORRADOR para emitir.",
+        );
+        return;
+      }
+      if (!gate.tryAcquire()) return;
+
+      try {
+        if (
+          !window.confirm(
+            `¿Emitir ${drafts.length} borrador${drafts.length === 1 ? "" : "es"}? Cada documento se procesará por separado; los ya emitidos no se volverán a emitir.`,
+          )
+        ) {
+          return;
+        }
+
+        setBulkEmissionBusy(true);
+        setBulkEmissionMessage("");
+        const results = await runDeCAEmissionBatch(
+          drafts.map((deca) => deca.id),
+          (id) => processDeCAEmission(id, true),
+        );
+        const emittedIds = new Set(
+          results
+            .filter((result) => result.outcome.status === "emitted")
+            .map((result) => result.id),
+        );
+        setSelectedDecaIds((current) => {
+          const next = new Set(current);
+          emittedIds.forEach((id) => next.delete(id));
+          return next;
+        });
+
+        const emittedCount = results.filter(
+          (result) => result.outcome.status === "emitted",
+        ).length;
+        const failed = results.filter(
+          (result) => result.outcome.status === "failed",
+        );
+        const pending = results.filter(
+          (result) => result.outcome.status === "pending",
+        );
+        const details = results.flatMap((result) =>
+          result.outcome.status === "emitted"
+            ? []
+            : [`${result.id}: ${result.outcome.message}`],
+        );
+        setBulkEmissionMessage(
+          `${emittedCount} emitido(s), ${failed.length} fallido(s), ${pending.length} pendiente(s).${details.length ? `\n${details.join("\n")}` : ""}`,
+        );
+      } finally {
+        setBulkEmissionBusy(false);
+        gate.release();
+      }
+  };
+
   const handleToggleDecaSelection = (id: string, checked: boolean) => {
-    if (bulkLockRef.current) return;
+      if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
     setSelectedDecaIds((prev) => {
       const next = new Set(prev);
       if (checked) next.add(id);
@@ -4813,7 +4992,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const handleSelectAll = () => {
-    if (bulkLockRef.current) return;
+    if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
     const elegibles = decas.filter((d) => d.estado !== "EMITIENDO");
     const elegibleIds = new Set(elegibles.map((d) => d.id));
     const allSelected = elegibles.every((d) => selectedDecaIds.has(d.id));
@@ -4831,7 +5010,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const handleBulkDelete = async () => {
-    if (bulkLockRef.current) return;
+    if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
 
     const validos = getValidSelection();
     if (validos.length === 0) {
@@ -6819,7 +6998,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       isValidHttpsPdfUrl(deca.pdfPublicUrl)
                     }
                     isSelected={selectedDecaIds.has(deca.id)}
-                    selectable={deca.estado !== "EMITIENDO" && !bulkDeleting}
+                    selectable={
+                      deca.estado !== "EMITIENDO" &&
+                      !bulkDeleting &&
+                      !bulkEmissionBusy
+                    }
                     onToggle={handleToggleDecaSelection}
                     onOpen={() => {
                       setSelectedId(deca.id);
@@ -6836,7 +7019,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 <button
                   type="button"
                   onClick={handleSelectAll}
-                  disabled={bulkDeleting}
+                  disabled={bulkDeleting || bulkEmissionBusy}
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {decas
@@ -6848,7 +7031,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedDecaIds(new Set())}
-                  disabled={bulkDeleting}
+                  disabled={bulkDeleting || bulkEmissionBusy}
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Limpiar selección
@@ -6857,10 +7040,22 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   {getValidSelection().length} seleccionado(s)
                 </span>
               </div>
+              {getSelectedDrafts().length > 0 && (
+                <button
+                  type="button"
+                  disabled={bulkDeleting || bulkEmissionBusy}
+                  onClick={handleBulkEmission}
+                  className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {bulkEmissionBusy
+                    ? "Emitiendo borradores seleccionados..."
+                    : `Emitir borradores seleccionados (${getSelectedDrafts().length})`}
+                </button>
+              )}
               {getValidSelection().length > 0 && (
                 <button
                   type="button"
-                  disabled={bulkDeleting}
+                  disabled={bulkDeleting || bulkEmissionBusy}
                   onClick={handleBulkDelete}
                   className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -6868,6 +7063,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 </button>
               )}
             </div>
+            {bulkEmissionMessage && (
+              <p
+                role="status"
+                className="mt-3 whitespace-pre-wrap text-sm text-slate-700"
+              >
+                {bulkEmissionMessage}
+              </p>
+            )}
             {bulkSummary && (
               <div className="mt-3 space-y-1 text-sm">
                 <div className="flex justify-between text-slate-700">
@@ -7878,27 +8081,29 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   {isSelectedDeCADraft && (
                     <button
                       type="button"
-                      onClick={reserveSelectedDeCAEmission}
-                      disabled={emissionAction === "reserving"}
+                      onClick={handleEmitSelectedDeCA}
+                      disabled={
+                        emissionAction === "reserving" || bulkEmissionBusy
+                      }
                       className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
                     >
                       {emissionAction === "reserving"
-                        ? "Reservando emisión..."
+                        ? "Emitiendo DeCA..."
                         : "Emitir DeCA"}
                     </button>
                   )}
                   {selectedDeCA.estado === "EMITIENDO" && (
                     <button
                       type="button"
-                      onClick={finalizeSelectedDeCAEmission}
-                      disabled={emissionAction === "finalizing"}
+                      onClick={handleEmitSelectedDeCA}
+                      disabled={
+                        emissionAction === "reserving" || bulkEmissionBusy
+                      }
                       className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
                     >
-                      {emissionAction === "finalizing"
-                        ? "Finalizando emisión..."
-                        : emissionRetryIds.has(selectedDeCA.id)
-                          ? "Reintentar emisión"
-                          : "Finalizar emisión"}
+                      {emissionAction === "reserving"
+                        ? "Recuperando emisión..."
+                        : "Reanudar emisión"}
                     </button>
                   )}
                   {selectedDeCA.estado === "EMITIDO" &&
