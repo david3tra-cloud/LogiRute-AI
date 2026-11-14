@@ -5,6 +5,8 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import { useAppNavigation } from "./useAppNavigation";
+import { AppModule } from "./navigationHistory";
 import {
   Plus,
   Loader2,
@@ -226,7 +228,6 @@ const formatCoordinate = (value: number): string => {
   return `${sign}${digits.slice(0, decimalPosition)}.${digits.slice(decimalPosition)}`;
 };
 
-type AppModule = "home" | "routes" | "decas" | "billing";
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{
@@ -410,7 +411,37 @@ const App: React.FC = () => {
   const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(
     hasPasswordRecoveryPending,
   );
-  const [activeModule, setActiveModule] = useState<AppModule>("home");
+  const decaBusyRef = useRef(false);
+  const isNavigationBusy = useCallback(() => {
+    return (
+      deliverySaveInProgressRef.current ||
+      mapsResolutionInProgressRef.current ||
+      csvImportInProgressRef.current ||
+      isClosingJornadaRef.current ||
+      decaBusyRef.current
+    );
+  }, []);
+
+  const {
+    navState,
+    navigateTo,
+    openModal,
+    closeModal,
+    goBack,
+    normalize,
+    closeManager,
+    onSignOutReset,
+  } = useAppNavigation({
+    currentUserId: user?.id ?? null,
+    isAuthLoading,
+    isBusy: isNavigationBusy,
+    onNotice: (msg) => setRouteNotice(msg),
+  });
+
+  const activeModule = navState.module;
+  const isRegistroOpen = navState.modal === "registro";
+  const isCsvImportOpen = navState.modal === "csvRoute";
+  const isAdding = navState.modal === "addDelivery";
   const [deferredInstallPrompt, setDeferredInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [isPwaInstalled, setIsPwaInstalled] = useState(false);
@@ -448,7 +479,6 @@ const App: React.FC = () => {
   });
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [isAdding, setIsAdding] = useState(false);
   const [editingDelivery, setEditingDelivery] = useState<Delivery | null>(null);
   const [editingLocked, setEditingLocked] = useState(false);
   const editingLockedRef = useRef(false);
@@ -480,9 +510,7 @@ const App: React.FC = () => {
   const [isAppClosed, setIsAppClosed] = useState(false);
   const isAppClosedRef = useRef(isAppClosed);
   isAppClosedRef.current = isAppClosed;
-  const [isRegistroOpen, setIsRegistroOpen] = useState(false);
   const [isClosingJornada, setIsClosingJornada] = useState(false);
-  const [isCsvImportOpen, setIsCsvImportOpen] = useState(false);
   const isClosingJornadaRef = useRef(false);
   const cloudCloseRef = useRef<(() => Promise<void>) | null>(null);
   const sessionUserRef = useRef<string | null>(null);
@@ -534,6 +562,7 @@ const App: React.FC = () => {
       }
       if (event === "SIGNED_OUT") {
         setPasswordRecoveryPending(false);
+        onSignOutReset();
       }
       setUser(session?.user ?? null);
       setIsAuthLoading(false);
@@ -609,7 +638,6 @@ const App: React.FC = () => {
   // key por usuario del montaje de DeCASection.
   useEffect(() => {
     const userId = user?.id;
-    setIsRegistroOpen(false);
     if (!userId) {
       setDeliveries([]);
       setManualSequence([]);
@@ -718,6 +746,7 @@ const App: React.FC = () => {
   };
 
   const handleSignOut = async () => {
+    onSignOutReset();
     const { error } = await supabase.auth.signOut();
     if (error) alert("No se pudo cerrar la sesión. Inténtalo de nuevo.");
   };
@@ -741,7 +770,7 @@ const App: React.FC = () => {
     setEditNotesInput("");
     setNewType(DeliveryType.DELIVERY);
     setRouteNotice(null);
-    setIsAdding(true);
+    openModal("addDelivery");
   };
 
   const openEditDelivery = (delivery: Delivery) => {
@@ -765,14 +794,14 @@ const App: React.FC = () => {
     setEditNotesInput(delivery.notes ?? "");
     setNewType(delivery.type);
     setRouteNotice(null);
-    setIsAdding(true);
+    openModal("addDelivery", delivery.id);
   };
 
   const closeDeliveryForm = () => {
     invalidateMapsResolution();
-    setIsAdding(false);
     setEditingDelivery(null);
     initialLocationInputRef.current = "";
+    closeModal("addDelivery");
   };
 
   const handleToggleEditingLocked = () => {
@@ -1288,7 +1317,7 @@ const App: React.FC = () => {
           `${newStops.length} parada${newStops.length !== 1 ? "s" : ""} importada${newStops.length !== 1 ? "s" : ""} correctamente.`,
         );
       }
-      setIsCsvImportOpen(false);
+      closeModal("csvRoute");
     } finally {
       csvImportInProgressRef.current = false;
     }
@@ -1541,7 +1570,7 @@ const App: React.FC = () => {
               key={module.id}
               type="button"
               aria-current={activeModule === module.id ? "page" : undefined}
-              onClick={() => setActiveModule(module.id)}
+              onClick={() => navigateTo(module.id)}
               className={`rounded-lg px-2 py-2 text-[10px] font-black transition sm:px-4 sm:text-xs ${
                 activeModule === module.id
                   ? "bg-white text-blue-700 shadow-sm"
@@ -1676,7 +1705,7 @@ const App: React.FC = () => {
                   <button
                     key={card.id}
                     type="button"
-                    onClick={() => setActiveModule(card.id as AppModule)}
+                    onClick={() => navigateTo(card.id as AppModule)}
                     className="group flex min-h-52 w-full flex-col rounded-2xl border border-slate-200 border-t-4 bg-white p-5 text-left shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-md focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 sm:min-h-56 sm:p-6"
                   >
                     <span
@@ -1762,7 +1791,7 @@ const App: React.FC = () => {
               <div className="hidden sm:flex flex-wrap items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setIsCsvImportOpen(true)}
+                  onClick={() => openModal("csvRoute")}
                   disabled={isAdding || editingDelivery !== null}
                   className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[9px] sm:text-[10px] font-black uppercase disabled:opacity-40 hover:bg-blue-50 transition flex items-center gap-1"
                 >
@@ -1802,7 +1831,7 @@ const App: React.FC = () => {
           <div className="sm:hidden bg-white border-b px-3 py-2 flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
-              onClick={() => setIsCsvImportOpen(true)}
+              onClick={() => openModal("csvRoute")}
               disabled={isAdding || editingDelivery !== null}
               className="bg-white text-blue-600 border border-blue-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase whitespace-nowrap disabled:opacity-40 flex items-center gap-1"
             >
@@ -2022,7 +2051,7 @@ const App: React.FC = () => {
                   <div className="flex flex-wrap gap-4">
                     <button
                       type="button"
-                      onClick={() => setIsRegistroOpen(true)}
+                      onClick={() => openModal("registro")}
                       className="bg-slate-900 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-2xl font-black flex items-center gap-2 shadow-lg hover:bg-slate-800 transition-all uppercase text-xs"
                     >
                       REGISTRO
@@ -2128,7 +2157,7 @@ const App: React.FC = () => {
           {/* Modal Nueva Parada / Editar Parada */}
           {isCsvImportOpen && (
             <RouteCsvImportModal
-              onClose={() => setIsCsvImportOpen(false)}
+              onClose={() => closeModal("csvRoute")}
               onImport={handleCsvImport}
               disabled={isAdding || editingDelivery !== null}
             />
@@ -2362,6 +2391,18 @@ const App: React.FC = () => {
             deliveries.some((delivery) => delivery.decaId === decaId)
           }
           onAddToRoutes={handleAddDeCAToRoutes}
+          navSubView={navState.module === "decas" ? navState.subView : undefined}
+          navSelectedId={navState.module === "decas" ? navState.selectedId : undefined}
+          navModal={navState.module === "decas" ? navState.modal : undefined}
+          onNavigate={(subView, selectedId) => navigateTo("decas", subView, selectedId)}
+          onOpenModal={(modal, selectedId) => openModal(modal, selectedId)}
+          onCloseModal={(modal) => closeModal(modal)}
+          onCloseManager={closeManager}
+          onGoBack={goBack}
+          onNormalize={normalize}
+          onBusyChange={(busy) => {
+            decaBusyRef.current = busy;
+          }}
         />
       </section>
       <section
@@ -2371,7 +2412,7 @@ const App: React.FC = () => {
       </section>
       <RegistroModal
         isOpen={isRegistroOpen}
-        onClose={() => setIsRegistroOpen(false)}
+        onClose={() => closeModal("registro")}
         userId={user?.id}
       />
     </div>
