@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import type { AppModal, DeCASubView } from "./navigationHistory";
 import DeCAListCard from "./DeCAListCard";
 import QRCode from "qrcode";
 import { supabase } from "./lib/supabase";
@@ -1430,12 +1431,32 @@ interface DeCASectionProps {
   isDeCAInRoutes: (decaId: string) => boolean;
   onAddToRoutes: (deca: DeCA) => Promise<AddDeCAToRoutesResult>;
   sessionUserId: string | null;
+  navSubView?: DeCASubView;
+  navSelectedId?: string;
+  navModal?: AppModal;
+  onNavigate?: (subView: DeCASubView, selectedId?: string) => void;
+  onOpenModal?: (modal: AppModal, selectedId?: string) => void;
+  onCloseModal?: (modal?: AppModal) => void;
+  onCloseManager?: (returnView: DeCASubView) => void;
+  onGoBack?: () => void;
+  onNormalize?: (updates: { subView?: DeCASubView; selectedId?: string; modal?: AppModal }) => void;
+  onBusyChange?: (isBusy: boolean) => void;
 }
 
 const DeCASection: React.FC<DeCASectionProps> = ({
   isDeCAInRoutes,
   onAddToRoutes,
   sessionUserId,
+  navSubView,
+  navSelectedId,
+  navModal,
+  onNavigate,
+  onOpenModal,
+  onCloseModal,
+  onCloseManager,
+  onGoBack,
+  onNormalize,
+  onBusyChange,
 }) => {
   const [initialCompanyLoad] = useState(loadEmpresas);
   const [companies, setCompanies] = useState<EmpresaHabitual[]>(
@@ -1608,6 +1629,115 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     ),
   );
 
+  const navigateToView = useCallback(
+    (nextView: SectionView, docId?: string) => {
+      if (onNavigate) {
+        onNavigate(nextView as DeCASubView, docId);
+      } else {
+        if (docId !== undefined) setSelectedId(docId);
+        setView(nextView);
+      }
+    },
+    [onNavigate],
+  );
+
+  const handleVolver = useCallback(() => {
+    if (onGoBack) {
+      onGoBack();
+    } else {
+      setView("list");
+    }
+  }, [onGoBack]);
+
+  const handleCloseManager = useCallback(
+    (returnView: SectionView) => {
+      if (onCloseManager) {
+        onCloseManager(returnView as DeCASubView);
+      } else if (onNormalize) {
+        onNormalize({
+          subView: returnView as DeCASubView,
+          selectedId: undefined,
+          modal: undefined,
+        });
+      } else {
+        navigateToView(returnView);
+      }
+    },
+    [navigateToView, onCloseManager, onNormalize],
+  );
+
+  const handleOpenModal = useCallback(
+    (modal: AppModal, docId?: string) => {
+      if (onOpenModal) {
+        onOpenModal(modal, docId);
+      } else {
+        if (modal === "plates") setPlateManagerOpen(true);
+        if (modal === "decaCsv") setDecaCsvPanelOpen(true);
+        if (modal === "decaBulk") setBulkPanelOpen(true);
+        if (modal === "decaQr") {
+          const doc = decas.find((d) => d.id === docId);
+          setQrOpenDeCA(doc ?? null);
+        }
+      }
+    },
+    [onOpenModal, decas],
+  );
+
+  const handleCloseModal = useCallback(
+    (modal?: AppModal) => {
+      if (onCloseModal) {
+        onCloseModal(modal);
+      } else {
+        setPlateManagerOpen(false);
+        setDecaCsvPanelOpen(false);
+        setBulkPanelOpen(false);
+        setQrOpenDeCA(null);
+      }
+    },
+    [onCloseModal],
+  );
+
+  useEffect(() => {
+    if (navSubView && navSubView !== view) {
+      setView(navSubView);
+    }
+  }, [navSubView]);
+
+  useEffect(() => {
+    if (navSelectedId !== undefined && navSelectedId !== selectedId) {
+      setSelectedId(navSelectedId);
+    }
+  }, [navSelectedId]);
+
+  useEffect(() => {
+    if (navModal !== undefined) {
+      setPlateManagerOpen(navModal === "plates");
+      setDecaCsvPanelOpen(navModal === "decaCsv");
+      setBulkPanelOpen(navModal === "decaBulk");
+      if (navModal === "decaQr" && navSelectedId) {
+        const doc = decas.find((d) => d.id === navSelectedId);
+        setQrOpenDeCA(doc ?? null);
+      } else if (navModal !== "decaQr") {
+        setQrOpenDeCA(null);
+      }
+    } else {
+      setPlateManagerOpen(false);
+      setDecaCsvPanelOpen(false);
+      setBulkPanelOpen(false);
+      setQrOpenDeCA(null);
+    }
+  }, [navModal, navSelectedId, decas]);
+
+  useEffect(() => {
+    if (remoteLoading) return;
+    if (navSubView === "detail" && navSelectedId) {
+      const exists = decas.some((d) => d.id === navSelectedId);
+      if (!exists) {
+        onNormalize?.({ subView: "list", selectedId: undefined });
+      }
+    }
+  }, [remoteLoading, navSubView, navSelectedId, decas, onNormalize]);
+
   // Limpia la selección y el resumen del lote cuando cambia la sesión de usuario.
   // El finally de un lote antiguo no desbloquea ni altera el lote nuevo porque
   // comprueba la generación antes de tocar bulkLockRef.
@@ -1633,6 +1763,20 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const [ocrError, setOcrError] = useState("");
   const [ocrNotice, setOcrNotice] = useState("");
   const [ocrLoading, setOcrLoading] = useState(false);
+  const isDeCABusy =
+    bulkSaving ||
+    bulkEmissionBusy ||
+    emissionAction !== "idle" ||
+    documentAction !== "idle" ||
+    decaCsvImporting ||
+    ocrLoading ||
+    isRemoteEditSaving ||
+    bulkDeleting;
+
+  useEffect(() => {
+    onBusyChange?.(isDeCABusy);
+  }, [isDeCABusy, onBusyChange]);
+
   const [ocrProgress, setOcrProgress] = useState(0);
   const [detectedText, setDetectedText] = useState<string | null>(null);
   const [regionDiagnostics, setRegionDiagnostics] =
@@ -4107,7 +4251,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const openCompanyManager = (action?: "create" | "import") => {
     companyManagerReturnView.current = view === "companies" ? "list" : view;
     setCompanyManagerAction(action);
-    setView("companies");
+    navigateToView("companies");
   };
 
   const updateCompanies = async (
@@ -4301,7 +4445,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const openTransportistaManager = () => {
     transportistaManagerReturnView.current =
       view === "carriers" ? "list" : view;
-    setView("carriers");
+    navigateToView("carriers");
   };
 
   const updateTransportistas = (next: TransportistaHabitual[]) => {
@@ -4848,7 +4992,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setLoaderLoadedNotice(false);
     setDestinationLoadedNotice(false);
     defaultDateRef.current = getToday();
-    setView("list");
+    handleVolver();
   };
 
   const makeDecaDeletionDeps = (): DecaDeletionDeps => ({
@@ -4890,12 +5034,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     if (result.status === "confirmed" || result.status === "in_flight_insert_marked") {
       setDecas((current) => current.filter((d) => d.id !== deca.id));
       setSelectedId(null);
-      setView("list");
+      handleVolver();
     } else if (result.status === "unconfirmed") {
       if (result.queuedForRetry) {
         setDecas((current) => current.filter((d) => d.id !== deca.id));
         setSelectedId(null);
-        setView("list");
+        handleVolver();
         alert(
           "El DeCA se ocultó de la lista y se reintentará automáticamente." +
             (result.errorMessage ? "\n" + result.errorMessage : ""),
@@ -5156,7 +5300,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     defaultDateRef.current = getToday();
     editedFieldsRef.current.clear();
     manuallyEditedFieldsRef.current.clear();
-    setView("form");
+    navigateToView("form");
   };
 
   const saveCurrentPlate = () => {
@@ -5245,7 +5389,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     setDetectedText(null);
     editedFieldsRef.current.clear();
     manuallyEditedFieldsRef.current.clear();
-    setView("form");
+    navigateToView("form");
   };
 
   const handleDecaCsvFile = async (
@@ -5460,7 +5604,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       setBulkMessage("");
       setBulkError("");
     }
-    setBulkPanelOpen(true);
+    handleOpenModal("decaBulk");
   };
 
   const confirmBulkDecas = async () => {
@@ -5597,7 +5741,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         setBulkMessage(
           `${savedCount} DeCAs creados y sincronizados correctamente.${refreshError}`,
         );
-        setBulkPanelOpen(false);
+        handleCloseModal("decaBulk");
       } else {
         setBulkError(
           `${savedCount} DeCAs creados y sincronizados; ${failedLines.length} no se pudieron guardar.${refreshError}\n${failedLines.join("\n")}\nLas líneas ya confirmadas no se reenviarán al reintentar.`,
@@ -5722,7 +5866,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         );
       }
 
-      setDecaCsvPanelOpen(false);
+      handleCloseModal("decaCsv");
       setDecaCsvPreview(null);
       setDecaCsvReadError("");
     } catch (error) {
@@ -5749,7 +5893,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         >
           <button
             type="button"
-            onClick={() => setView("list")}
+            onClick={() => navigateToView("list")}
             aria-current={
               view !== "companies" && view !== "carriers" ? "page" : undefined
             }
@@ -5879,7 +6023,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             initialAction={companyManagerAction}
             onClose={() => {
               setCompanyManagerAction(undefined);
-              setView(companyManagerReturnView.current);
+              handleCloseManager(companyManagerReturnView.current);
             }}
           />
         )}
@@ -5935,7 +6079,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             <TransportistasManager
               transportistas={transportistas}
               onChange={updateTransportistas}
-              onClose={() => setView(transportistaManagerReturnView.current)}
+              onClose={() =>
+                handleCloseManager(transportistaManagerReturnView.current)
+              }
             />
           </>
         )}
@@ -5975,7 +6121,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   type="button"
                   disabled={bulkSaving}
                   onClick={() => {
-                    setDecaCsvPanelOpen(true);
+                    handleOpenModal("decaCsv");
                     setDecaCsvPreview(null);
                     setDecaCsvReadError("");
                     setDecaCsvImportMessage("");
@@ -6657,7 +6803,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   <button
                     type="button"
                     disabled={bulkSaving}
-                    onClick={() => setBulkPanelOpen(false)}
+                    onClick={() => handleCloseModal("decaBulk")}
                     className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
                   >
                     Cancelar
@@ -6952,7 +7098,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setDecaCsvPanelOpen(false);
+                      handleCloseModal("decaCsv");
                       setDecaCsvPreview(null);
                       setDecaCsvReadError("");
                     }}
@@ -7005,10 +7151,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     }
                     onToggle={handleToggleDecaSelection}
                     onOpen={() => {
-                      setSelectedId(deca.id);
-                      setView("detail");
+                      navigateToView("detail", deca.id);
                     }}
-                    onShowQr={() => setQrOpenDeCA(deca)}
+                    onShowQr={() => handleOpenModal("decaQr", deca.id)}
                   />
                 ))}
               </div>
@@ -7127,7 +7272,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           <div className="mx-auto max-w-3xl">
             <button
               type="button"
-              onClick={() => setView("list")}
+              onClick={handleVolver}
               className="mb-4 inline-flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-slate-900"
             >
               <ArrowLeft size={17} /> Volver a Mis DeCAs
@@ -7659,7 +7804,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       )}
                     <button
                       type="button"
-                      onClick={() => setPlateManagerOpen(true)}
+                      onClick={() => handleOpenModal("plates")}
                       className="text-xs font-bold text-blue-700 hover:underline"
                     >
                       Gestionar matrículas habituales
@@ -7990,7 +8135,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           <div className="mx-auto max-w-3xl">
             <button
               type="button"
-              onClick={() => setView("list")}
+              onClick={handleVolver}
               className="mb-4 inline-flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-slate-900"
             >
               <ArrowLeft size={17} /> Volver a Mis DeCAs
@@ -8367,7 +8512,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             role="presentation"
             onClick={(event) => {
               if (event.target === event.currentTarget) {
-                setQrOpenDeCA(null);
+                handleCloseModal("decaQr");
               }
             }}
           >
@@ -8386,7 +8531,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 </h2>
                 <button
                   type="button"
-                  onClick={() => setQrOpenDeCA(null)}
+                  onClick={() => handleCloseModal("decaQr")}
                   className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
                 >
                   Cerrar
