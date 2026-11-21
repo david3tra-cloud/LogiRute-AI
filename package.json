@@ -18,6 +18,8 @@
     "test:deca-emission-batch": "node deca-emission-batch-regression.cjs && node deca-emission-workflow-regression.cjs",
     "test:deca-emission-failure-rpc": "node deca-emission-failure-rpc-regression.cjs",
     "test:deca-transportista-identity": "node deca-transportista-identity-regression.cjs",
+    "test:deca-transportista-integration": "vitest run --config vitest.config.mts",
+    "typecheck:deca-transportista-integration": "tsc -p tsconfig.deca-transportista-integration.json --noEmit",
     "test:route-csv": "node route-csv-regresion.cjs",
     "test:deca-deletion": "node deca-deletion-regresion.cjs"
   },
@@ -37,14 +39,18 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
     "@types/node": "^22.14.0",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "29.1.1",
     "terser": "^5.46.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite-plugin-pwa": "^1.2.0",
+    "vitest": "5.1.1"
   }
 }
