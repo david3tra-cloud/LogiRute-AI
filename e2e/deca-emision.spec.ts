@@ -8,13 +8,12 @@ import {
   type Response,
   type Route,
 } from "@playwright/test";
+import type { DecaRow } from "../decaSupabaseService";
 
-type EmittedDecaRow = {
-  id: string;
-  estado: string;
-  pdf_public_url: string | null;
-  pdf_sha256: string | null;
-};
+type EmittedDecaRow = Pick<
+  DecaRow,
+  "id" | "estado" | "pdf_path" | "pdf_public_url" | "pdf_sha256"
+>;
 
 const stagingUrl = process.env.DECA_STAGING_URL;
 const email = process.env.DECA_STAGING_EMAIL;
