@@ -167,6 +167,7 @@ const UPDATE_COLUMNS = [
   "destinatario_codigo_postal",
   "destinatario_pais",
   "transportista",
+  "transportista_habitual_id",
   "transportista_nif",
   "transportista_direccion",
   "transportista_ciudad",
@@ -391,6 +392,29 @@ export async function updateUserDeca(
       changes.cargador,
     );
     updatePayload.empresa_habitual_id = cargador?.id ?? null;
+  }
+  if (Object.hasOwn(changes, "transportista_habitual_id")) {
+    const requestedId = changes.transportista_habitual_id;
+    if (requestedId === null) {
+      updatePayload.transportista_habitual_id = null;
+    } else {
+      if (typeof requestedId !== "string" || !requestedId.trim()) {
+        throw new Error(
+          "El identificador del transportista no puede estar vacío.",
+        );
+      }
+      const transportista = await resolveUserTransportistaHabitualForDeCA(
+        requestedId,
+        changes.transportista_nif,
+        changes.transportista,
+      );
+      if (!transportista) {
+        throw new Error(
+          "No se encontró la ficha del transportista indicada por ID.",
+        );
+      }
+      updatePayload.transportista_habitual_id = transportista.row.id;
+    }
   }
 
   const { data, error } = await supabase
