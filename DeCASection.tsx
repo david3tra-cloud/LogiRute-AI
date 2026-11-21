@@ -72,6 +72,13 @@ import {
   resolveDeCACsvRows,
 } from "./decaCsvIdentity";
 import {
+  editTransportistaIdentityFields,
+  findTransportistaProfileForFields,
+  selectTransportistaFields,
+  transportistaFieldsFromDeCA,
+  transportistaUpdateFields,
+} from "./decaTransportistaIdentity";
+import {
   getImageDimensions,
   recognizeDachserRegions,
   type DachserRegionTexts,
@@ -224,6 +231,7 @@ type DeCAForm = Pick<
   | "matriculaVehiculo"
   | "notas"
   | "transportista"
+  | "transportistaId"
   | "transportistaNif"
   | "transportistaDireccion"
   | "transportistaCiudad"
@@ -242,6 +250,7 @@ type BulkDeCACommon = Pick<
   | "cargador"
   | "matriculaVehiculo"
   | "transportista"
+  | "transportistaId"
   | "transportistaNif"
   | "transportistaDireccion"
   | "transportistaCiudad"
@@ -1318,6 +1327,7 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   destinatarioCodigoPostal: "",
   destinatarioPais: "",
   transportista: defaultCarrier?.nombre ?? "",
+  transportistaId: defaultCarrier?.id ?? "",
   transportistaNif: defaultCarrier?.nif ?? "",
   transportistaDireccion: defaultCarrier?.direccion ?? "",
   transportistaCiudad: defaultCarrier?.ciudad ?? "",
@@ -1554,6 +1564,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     cargador: "",
     matriculaVehiculo: "",
     transportista: "",
+    transportistaId: "",
     transportistaNif: "",
     transportistaDireccion: "",
     transportistaCiudad: "",
@@ -4108,10 +4119,29 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
   const updateField = (field: keyof DeCAForm, value: string) => {
     editedFieldsRef.current.add(field);
-    const next: DeCAForm = { ...formRef.current, [field]: value };
+    const current = formRef.current;
+    let next: DeCAForm = { ...current, [field]: value };
     if (field === "cargador") {
       next.cargadorId = "";
       next.cargadorNif = "";
+    }
+    if (field === "transportista" || field === "transportistaNif") {
+      const currentTransportistaFields = transportistaFieldsFromDeCA(current);
+      const selectedProfile = findTransportistaProfileForFields(
+        currentTransportistaFields,
+        transportistas,
+      );
+      next = {
+        ...current,
+        ...editTransportistaIdentityFields(
+          currentTransportistaFields,
+          field,
+          value,
+          selectedProfile,
+          (profileField) =>
+            manuallyEditedFieldsRef.current.has(profileField),
+        ),
+      };
     }
     if (field === "destinatario") next.destinatarioNif = "";
     manuallyEditedFieldsRef.current.add(field);
@@ -4214,21 +4244,32 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const selectTransportista = (item: TransportistaHabitual) => {
+    const preservePais =
+      manuallyEditedFieldsRef.current.has("transportistaPais");
     const next: DeCAForm = {
       ...formRef.current,
-      transportista: item.nombre,
-      transportistaNif: item.nif,
-      transportistaDireccion: item.direccion,
-      transportistaCiudad: item.ciudad,
-      transportistaCodigoPostal: item.codigoPostal,
-      transportistaProvincia: item.provincia,
-      transportistaPais: manuallyEditedFieldsRef.current.has("transportistaPais")
-        ? formRef.current.transportistaPais
-        : item.pais,
-      transportistaTelefono: item.telefono,
-      transportistaEmail: item.email,
-      transportistaNotas: item.notas,
+      ...selectTransportistaFields(
+        transportistaFieldsFromDeCA(formRef.current),
+        item,
+        preservePais,
+      ),
     };
+    for (const field of [
+      "transportista",
+      "transportistaNif",
+      "transportistaDireccion",
+      "transportistaCiudad",
+      "transportistaCodigoPostal",
+      "transportistaProvincia",
+      "transportistaPais",
+      "transportistaTelefono",
+      "transportistaEmail",
+      "transportistaNotas",
+    ] as const) {
+      if (field !== "transportistaPais" || !preservePais) {
+        manuallyEditedFieldsRef.current.delete(field);
+      }
+    }
     [
       "transportista",
       "transportistaNif",
@@ -4869,21 +4910,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               destinatario_codigo_postal:
                 savedForm.destinatarioCodigoPostal?.trim() || null,
               destinatario_pais: savedForm.destinatarioPais?.trim() || null,
-              transportista: savedForm.transportista.trim() || null,
-              transportista_nif: savedForm.transportistaNif?.trim() || null,
-              transportista_direccion:
-                savedForm.transportistaDireccion?.trim() || null,
-              transportista_ciudad:
-                savedForm.transportistaCiudad?.trim() || null,
-              transportista_codigo_postal:
-                savedForm.transportistaCodigoPostal?.trim() || null,
-              transportista_provincia:
-                savedForm.transportistaProvincia?.trim() || null,
-              transportista_pais: savedForm.transportistaPais?.trim() || null,
-              transportista_telefono:
-                savedForm.transportistaTelefono?.trim() || null,
-              transportista_email: savedForm.transportistaEmail?.trim() || null,
-              transportista_notas: savedForm.transportistaNotas?.trim() || null,
+              ...transportistaUpdateFields(
+                transportistaFieldsFromDeCA(savedForm),
+                (savedForm.transportistaId ?? "") !==
+                  (selectedDeCA.transportistaId ?? ""),
+              ),
               mercancia: savedForm.mercancia.trim() || null,
               bultos: toNullableNumber(
                 savedForm.numeroBultos,
@@ -5352,16 +5383,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       cargador: selectedDeCA.cargador ?? "",
       cargadorId: selectedDeCA.cargadorId ?? "",
       cargadorNif: selectedDeCA.cargadorNif ?? "",
-      transportista: selectedDeCA.transportista ?? "",
-      transportistaNif: selectedDeCA.transportistaNif ?? "",
-      transportistaDireccion: selectedDeCA.transportistaDireccion ?? "",
-      transportistaCiudad: selectedDeCA.transportistaCiudad ?? "",
-      transportistaCodigoPostal: selectedDeCA.transportistaCodigoPostal ?? "",
-      transportistaProvincia: selectedDeCA.transportistaProvincia ?? "",
-      transportistaPais: selectedDeCA.transportistaPais ?? "",
-      transportistaTelefono: selectedDeCA.transportistaTelefono ?? "",
-      transportistaEmail: selectedDeCA.transportistaEmail ?? "",
-      transportistaNotas: selectedDeCA.transportistaNotas ?? "",
+      ...transportistaFieldsFromDeCA(selectedDeCA),
       destinatario: selectedDeCA.destinatario ?? "",
       destinatarioNif: selectedDeCA.destinatarioNif ?? "",
       destinatarioCodigoPostal:
@@ -5549,18 +5571,31 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const selectBulkTransportista = (item: TransportistaHabitual) => {
     setBulkCommon((current) => ({
       ...current,
-      transportista: item.nombre,
-      transportistaNif: item.nif,
-      transportistaDireccion: item.direccion,
-      transportistaCiudad: item.ciudad,
-      transportistaCodigoPostal: item.codigoPostal,
-      transportistaProvincia: item.provincia,
-      transportistaPais: item.pais,
-      transportistaTelefono: item.telefono,
-      transportistaEmail: item.email,
-      transportistaNotas: item.notas,
+      ...selectTransportistaFields(
+        transportistaFieldsFromDeCA(current),
+        item,
+      ),
     }));
     setBulkOpenSuggestion(null);
+  };
+
+  const updateBulkTransportista = (value: string) => {
+    setBulkCommon((current) => {
+      const currentTransportistaFields = transportistaFieldsFromDeCA(current);
+      const selectedProfile = findTransportistaProfileForFields(
+        currentTransportistaFields,
+        transportistas,
+      );
+      return {
+        ...current,
+        ...editTransportistaIdentityFields(
+          currentTransportistaFields,
+          "transportista",
+          value,
+          selectedProfile,
+        ),
+      };
+    });
   };
 
   const openBulkPanel = () => {
@@ -5574,6 +5609,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         cargador: "",
         matriculaVehiculo: "",
         transportista: defaultTransportista?.nombre ?? "",
+        transportistaId: defaultTransportista?.id ?? "",
         transportistaNif: defaultTransportista?.nif ?? "",
         transportistaDireccion: defaultTransportista?.direccion ?? "",
         transportistaCiudad: defaultTransportista?.ciudad ?? "",
@@ -5642,16 +5678,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           fecha: bulkCommon.fecha.trim(),
           cargador: bulkCommon.cargador.trim(),
           matriculaVehiculo: normalizePlate(bulkCommon.matriculaVehiculo),
-          transportista: bulkCommon.transportista.trim(),
-          transportistaNif: bulkCommon.transportistaNif,
-          transportistaDireccion: bulkCommon.transportistaDireccion,
-          transportistaCiudad: bulkCommon.transportistaCiudad,
-          transportistaCodigoPostal: bulkCommon.transportistaCodigoPostal,
-          transportistaProvincia: bulkCommon.transportistaProvincia,
-          transportistaPais: bulkCommon.transportistaPais,
-          transportistaTelefono: bulkCommon.transportistaTelefono,
-          transportistaEmail: bulkCommon.transportistaEmail,
-          transportistaNotas: bulkCommon.transportistaNotas,
+          ...transportistaFieldsFromDeCA(bulkCommon),
           destinatario: line.destinatario.trim(),
           destinatarioCodigoPostal: line.destinatarioCodigoPostal.trim() || undefined,
           destinatarioPais: line.destinatarioPais.trim() || undefined,
@@ -6326,19 +6353,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       value={bulkCommon.transportista}
                       onFocus={() => setBulkOpenSuggestion("carrier")}
                       onChange={(event) => {
-                        setBulkCommon((current) => ({
-                          ...current,
-                          transportista: event.target.value,
-                          transportistaNif: "",
-                          transportistaDireccion: "",
-                          transportistaCiudad: "",
-                          transportistaCodigoPostal: "",
-                          transportistaProvincia: "",
-                          transportistaPais: "",
-                          transportistaTelefono: "",
-                          transportistaEmail: "",
-                          transportistaNotas: "",
-                        }));
+                        updateBulkTransportista(event.target.value);
                         setBulkOpenSuggestion("carrier");
                       }}
                       placeholder="Buscar transportista o escribir manualmente"
@@ -7490,6 +7505,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       onChange={(event) => {
                         setTransportistaQuery(event.target.value);
                         setTransportistaPickerOpen(true);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          setTransportistaPickerOpen(false);
+                        }
                       }}
                       placeholder="Buscar por nombre, NIF, dirección, ciudad, CP, teléfono o email"
                       aria-label="Buscar transportista habitual"
