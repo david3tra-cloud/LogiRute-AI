@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "vite-env.d.ts",
+    "e2e/**/*.ts",
+    "playwright.config.ts",
+    "vite.config.e2e.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test-results",
+    ".continue",
+    "supabase"
+  ]
+}
