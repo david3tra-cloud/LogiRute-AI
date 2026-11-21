@@ -8,6 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json --noEmit",
+    "test:e2e:nav": "playwright test e2e/mobile-back-navigation.spec.ts",
     "test:empresas": "node empresas-regresion.cjs && node empresas-resolucion-test.cjs",
     "test:aislamiento": "node aislamiento-regresion.cjs",
     "test:registro": "node registro-regresion.cjs",

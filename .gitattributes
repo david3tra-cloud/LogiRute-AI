@@ -5,3 +5,5 @@
 *.json text
 *.css text
 *.html text
+# Preserve LF for the SHA-256 checked E2E fixture
+e2e/fixtures/tailwind-3.4.17.js text eol=lf
