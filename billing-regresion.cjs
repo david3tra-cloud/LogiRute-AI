@@ -26,8 +26,10 @@ async function main() {
     deliveries: { planned: 0, completed: 0 }, pickups: { planned: 0, completed: 0 }, complete: true,
   });
   assert.equal(aggregateActivity([{ snapshot: {} }]).complete, false);
-  assert.match(types, /interface Delivery\s*\{[\s\S]*?coordinates\?:\s*\[number, number\]/);
-  assert.doesNotMatch(types.match(/interface Delivery\s*\{([^}]*)\}/)[1], /kilomet|peso|kilo/i);
+  const deliveryType = types.match(/interface Delivery\s*\{([^}]*)\}/)[1];
+  assert.match(deliveryType, /coordinates\?:\s*\[number, number\]/);
+  assert.match(deliveryType, /pesoKg\?:\s*number\s*\|\s*null/);
+  assert.doesNotMatch(deliveryType, /kilomet/i);
 
   // Local model simulation only: database atomicity and the live RPC are not exercised here.
   const uniqueRows = new Map();
