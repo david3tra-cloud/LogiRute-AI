@@ -18,10 +18,7 @@ import {
   LogOut,
   Phone,
   Tag,
-  Map,
   FileText,
-  Receipt,
-  Download,
   Lock,
   Unlock,
 } from "lucide-react";
@@ -72,6 +69,7 @@ import type { RemoteRoute } from "./rutasSupabaseService";
 import { RegistroNubeModal as RegistroModal } from "./RegistroNubeModal";
 import { parseLecturaKm, validateLecturasKm } from "./jornadaMetricas.mjs";
 import { RouteCsvImportModal } from "./RouteCsvImportModal";
+import HomeSection from "./HomeSection";
 import {
   appendImportedRouteStops,
   type RouteCsvRow,
@@ -1602,132 +1600,27 @@ const App: React.FC = () => {
       <section
         className={`min-h-0 flex-1 overflow-y-auto ${activeModule === "home" ? "block" : "hidden"}`}
       >
-        <main className="min-h-full bg-slate-100 px-4 py-8 sm:px-8 sm:py-12">
-          <div className="mx-auto w-full max-w-6xl">
-            <div className="mb-8 sm:mb-10">
-              <p className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-blue-700">
-                LOGIROUTE AI
-              </p>
-              <h1 className="text-2xl font-black tracking-tight text-slate-900 sm:text-4xl">
-                Bienvenido a LogiRute
-              </h1>
-              <p className="mt-2 text-sm text-slate-600 sm:text-base">
-                Selecciona el área desde la que quieres trabajar.
-              </p>
-            </div>
-
-            {!isPwaInstalled &&
-              !isInstallDismissedRecently &&
-              !isInstallAccepted &&
-              (deferredInstallPrompt ||
+        <HomeSection
+          onNavigate={navigateTo}
+          showInstallPrompt={
+            !isPwaInstalled &&
+            !isInstallDismissedRecently &&
+            !isInstallAccepted &&
+            Boolean(
+              deferredInstallPrompt ||
                 isSafariIos ||
                 isInstallPromptDeclined ||
-                installError) && (
-                <aside
-                  aria-labelledby="pwa-install-title"
-                  className="mb-6 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:mb-8 sm:flex-row sm:items-center sm:justify-between sm:p-5"
-                >
-                  <div className="flex min-w-0 items-start gap-3">
-                    <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-700">
-                      <Download size={20} aria-hidden="true" />
-                    </span>
-                    <div className="min-w-0">
-                      <h2
-                        id="pwa-install-title"
-                        className="font-black text-slate-900"
-                      >
-                        Instala LogiRute
-                      </h2>
-                      <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                        {isSafariIos
-                          ? "Para instalarla, pulsa Compartir en Safari y selecciona “Añadir a pantalla de inicio”."
-                          : installError ??
-                            (isInstallPromptDeclined
-                              ? "Has pospuesto la instalación. Puedes instalar LogiRute desde el menú del navegador."
-                              : null) ??
-                            "Accede más rápido desde el escritorio o la pantalla de inicio."}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
-                    {deferredInstallPrompt && (
-                      <button
-                        type="button"
-                        onClick={handleInstallPwa}
-                        disabled={isInstallPrompting}
-                        className="inline-flex min-h-10 items-center justify-center rounded-lg bg-blue-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait disabled:opacity-60"
-                      >
-                        {isInstallPrompting
-                          ? "Abriendo instalación..."
-                          : "Instalar LogiRute"}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleDismissInstallPrompt}
-                      className="inline-flex min-h-10 items-center justify-center rounded-lg px-4 py-2 text-sm font-bold text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200"
-                    >
-                      Ahora no
-                    </button>
-                  </div>
-                </aside>
-              )}
-
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-5">
-              {[
-                {
-                  id: "routes",
-                  title: "Rutas",
-                  description:
-                    "Planifica y controla las paradas de la jornada.",
-                  icon: Map,
-                  accent: "border-t-blue-500 text-blue-700 bg-blue-50",
-                },
-                {
-                  id: "decas",
-                  title: "DeCAs",
-                  description:
-                    "Crea, importa, emite y consulta documentos de transporte.",
-                  icon: FileText,
-                  accent: "border-t-indigo-500 text-indigo-700 bg-indigo-50",
-                },
-                {
-                  id: "billing",
-                  title: "Facturación",
-                  description:
-                    "Gestiona la facturación y documentación económica.",
-                  icon: Receipt,
-                  accent: "border-t-emerald-500 text-emerald-700 bg-emerald-50",
-                },
-              ].map((card) => {
-                const Icon = card.icon;
-                return (
-                  <button
-                    key={card.id}
-                    type="button"
-                    onClick={() => navigateTo(card.id as AppModule)}
-                    className="group flex min-h-52 w-full flex-col rounded-2xl border border-slate-200 border-t-4 bg-white p-5 text-left shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-md focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 sm:min-h-56 sm:p-6"
-                  >
-                    <span
-                      className={`mb-5 inline-flex h-12 w-12 items-center justify-center rounded-xl ${card.accent}`}
-                    >
-                      <Icon size={24} strokeWidth={2.2} />
-                    </span>
-                    <span className="text-lg font-black text-slate-900 sm:text-xl">
-                      {card.title}
-                    </span>
-                    <span className="mt-2 text-sm leading-relaxed text-slate-600">
-                      {card.description}
-                    </span>
-                    <span className="mt-auto pt-5 text-xs font-bold text-slate-500 transition group-hover:text-slate-800">
-                      Abrir área
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </main>
+                installError,
+            )
+          }
+          isSafariIos={isSafariIos}
+          installError={installError}
+          isInstallPromptDeclined={isInstallPromptDeclined}
+          hasDeferredInstallPrompt={Boolean(deferredInstallPrompt)}
+          isInstallPrompting={isInstallPrompting}
+          onInstall={handleInstallPwa}
+          onDismissInstallPrompt={handleDismissInstallPrompt}
+        />
       </section>
 
       <div

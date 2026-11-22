@@ -85,8 +85,9 @@ async function main() {
   const migration = fs.readFileSync(path.join(__dirname, "supabase/migrations/20261031170000_jornada_metricas.sql"), "utf8");
   assert.match(billingUi, /record\.snapshot\.deliveries/);
   assert.match(billingUi, /record\.snapshot\.deliveries\) \? record\.snapshot\.deliveries/);
-  assert.match(billingUi, /Kilos de entregas:\s*\{dayWeights\.missingSnapshots > 0/);
-  assert.match(billingUi, /Kilos de recogidas:\s*\{dayWeights\.missingSnapshots > 0/);
+  assert.match(billingUi, /\["Entregas", "Recogidas"\] as const/);
+  assert.match(billingUi, /Peso de \{label\.toLowerCase\(\)\}/);
+  assert.match(billingUi, /dayWeights\.missingSnapshots > 0\s*\?\s*"Sin datos: falta la instantánea de paradas\."/);
   assert.doesNotMatch(billingUi, /listRemoteJornadas/);
   assert.match(migration, /kilometros_recorridos numeric GENERATED ALWAYS/);
   assert.match(migration, /Journey odometer values are immutable/);
