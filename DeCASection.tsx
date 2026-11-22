@@ -128,6 +128,14 @@ import {
   selectDeCADrafts,
   type DeCAEmissionOutcome,
 } from "./decaEmissionBatch";
+import {
+  DeCABulkRouteAddGate,
+  getDeCAIdsToRetry,
+  runDeCABulkAddToRoutes,
+  selectEligibleDeCAsForRoutes,
+  type DeCABulkRouteAddItemResult,
+  type DeCABulkRouteAddSummary,
+} from "./decaBulkAddToRoutes";
 import { emitDeCA } from "./decaEmissionWorkflow";
 
 const STORAGE_KEY = "transport_app_decas";
@@ -1617,6 +1625,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const emissionReservationGateRef = useRef(new EmissionReservationGate());
   const recoveredEmissionIdsRef = useRef(new Set<string>());
   const bulkEmissionGateRef = useRef(new DeCAEmissionBatchGate());
+  const bulkRouteAddGateRef = useRef(new DeCABulkRouteAddGate());
+  const [bulkRouteAddBusy, setBulkRouteAddBusy] = useState(false);
+  const [bulkRouteAddSummary, setBulkRouteAddSummary] =
+    useState<DeCABulkRouteAddSummary | null>(null);
   const [bulkEmissionBusy, setBulkEmissionBusy] = useState(false);
   const [bulkEmissionMessage, setBulkEmissionMessage] = useState("");
   const [selectedDecaIds, setSelectedDecaIds] = useState<Set<string>>(
@@ -1782,7 +1794,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     decaCsvImporting ||
     ocrLoading ||
     isRemoteEditSaving ||
-    bulkDeleting;
+    bulkDeleting ||
+    bulkRouteAddBusy;
 
   useEffect(() => {
     onBusyChange?.(isDeCABusy);
@@ -3328,13 +3341,18 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   }, [view]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
-  const addDeCAToRoutes = async (deca: DeCA) => {
-    if (
-      deca.estado !== "EMITIDO" ||
-      isDeCAInRoutes(deca.id) ||
-      addingDeCAIdsRef.current.has(deca.id)
-    ) {
-      return;
+  const addDeCAToRoutes = async (
+    deca: DeCA,
+  ): Promise<DeCABulkRouteAddItemResult> => {
+    if (deca.estado !== "EMITIDO") {
+      return {
+        status: "failed",
+        message: "Solo se pueden añadir DeCAs emitidos a Rutas.",
+      };
+    }
+    if (isDeCAInRoutes(deca.id)) return { status: "already-in-routes" };
+    if (addingDeCAIdsRef.current.has(deca.id)) {
+      return { status: "in-progress" };
     }
 
     addingDeCAIdsRef.current.add(deca.id);
@@ -3368,7 +3386,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           });
           break;
       }
-    } catch {
+      return result;
+    } catch (error) {
       setRouteAddMessages((current) => ({
         ...current,
         [deca.id]: {
@@ -3376,6 +3395,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           text: "No se pudo añadir a Rutas. Inténtalo de nuevo.",
         },
       }));
+      return {
+        status: "failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "No se pudo añadir a Rutas.",
+      };
     } finally {
       addingDeCAIdsRef.current.delete(deca.id);
       setAddingDeCAIds((current) => current.filter((id) => id !== deca.id));
@@ -3486,6 +3512,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       !selectedDeCA ||
       (!isSelectedDeCADraft && selectedDeCA.estado !== "EMITIENDO") ||
       bulkEmissionGateRef.current.isLocked ||
+      bulkRouteAddGateRef.current.isLocked ||
       emissionAction === "reserving"
     ) {
       return;
@@ -5048,7 +5075,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       remoteLoading ||
       !selectedDeCA ||
       bulkLockRef.current ||
-      bulkEmissionGateRef.current.isLocked
+      bulkEmissionGateRef.current.isLocked ||
+      bulkRouteAddGateRef.current.isLocked
     )
       return;
 
@@ -5092,12 +5120,51 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       );
   };
 
+  const getSelectedRouteAdditions = (): DeCA[] =>
+    selectEligibleDeCAsForRoutes(decas, selectedDecaIds, isDeCAInRoutes);
+
   const getSelectedDrafts = (): DeCA[] =>
       selectDeCADrafts(decas, selectedDecaIds);
 
+  const handleBulkAddToRoutes = async () => {
+    const gate = bulkRouteAddGateRef.current;
+    if (
+      gate.isLocked ||
+      bulkLockRef.current ||
+      bulkEmissionGateRef.current.isLocked
+    ) {
+      return;
+    }
+
+    const selected = decas.filter((deca) => selectedDecaIds.has(deca.id));
+    const eligible = getSelectedRouteAdditions();
+    if (eligible.length === 0) return;
+    const eligibleIds = new Set(eligible.map(({ id }) => id));
+    const initiallyOmittedIds = selected
+      .filter(({ id }) => !eligibleIds.has(id))
+      .map(({ id }) => id);
+
+    setBulkRouteAddBusy(true);
+    setBulkRouteAddSummary(null);
+    try {
+      const summary = await runDeCABulkAddToRoutes(
+        eligible,
+        (deca) => addDeCAToRoutes(deca),
+        gate,
+      );
+      if (!summary) return;
+
+      summary.omittedIds = [...initiallyOmittedIds, ...summary.omittedIds];
+      setSelectedDecaIds(getDeCAIdsToRetry(summary));
+      setBulkRouteAddSummary(summary);
+    } finally {
+      setBulkRouteAddBusy(false);
+    }
+  };
+
   const handleBulkEmission = async () => {
       const gate = bulkEmissionGateRef.current;
-      if (gate.isLocked) return;
+      if (gate.isLocked || bulkRouteAddGateRef.current.isLocked) return;
       const drafts = getSelectedDrafts();
       if (drafts.length === 0) {
         setBulkEmissionMessage(
@@ -5157,7 +5224,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const handleToggleDecaSelection = (id: string, checked: boolean) => {
-      if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
+      if (
+        bulkLockRef.current ||
+        bulkEmissionGateRef.current.isLocked ||
+        bulkRouteAddGateRef.current.isLocked
+      ) return;
     setSelectedDecaIds((prev) => {
       const next = new Set(prev);
       if (checked) next.add(id);
@@ -5167,7 +5238,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const handleSelectAll = () => {
-    if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
+    if (
+      bulkLockRef.current ||
+      bulkEmissionGateRef.current.isLocked ||
+      bulkRouteAddGateRef.current.isLocked
+    ) return;
     const elegibles = decas.filter((d) => d.estado !== "EMITIENDO");
     const elegibleIds = new Set(elegibles.map((d) => d.id));
     const allSelected = elegibles.every((d) => selectedDecaIds.has(d.id));
@@ -5185,7 +5260,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const handleBulkDelete = async () => {
-    if (bulkLockRef.current || bulkEmissionGateRef.current.isLocked) return;
+    if (
+      bulkLockRef.current ||
+      bulkEmissionGateRef.current.isLocked ||
+      bulkRouteAddGateRef.current.isLocked
+    ) return;
 
     const validos = getValidSelection();
     if (validos.length === 0) {
@@ -7162,10 +7241,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     selectable={
                       deca.estado !== "EMITIENDO" &&
                       !bulkDeleting &&
-                      !bulkEmissionBusy
+                      !bulkEmissionBusy &&
+                      !bulkRouteAddBusy
                     }
                     onToggle={handleToggleDecaSelection}
                     onOpen={() => {
+                      if (bulkRouteAddGateRef.current.isLocked) return;
                       navigateToView("detail", deca.id);
                     }}
                     onShowQr={() => handleOpenModal("decaQr", deca.id)}
@@ -7179,7 +7260,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 <button
                   type="button"
                   onClick={handleSelectAll}
-                  disabled={bulkDeleting || bulkEmissionBusy}
+                  disabled={
+                    bulkDeleting || bulkEmissionBusy || bulkRouteAddBusy
+                  }
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {decas
@@ -7191,10 +7274,27 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedDecaIds(new Set())}
-                  disabled={bulkDeleting || bulkEmissionBusy}
+                  disabled={
+                    bulkDeleting || bulkEmissionBusy || bulkRouteAddBusy
+                  }
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Limpiar selección
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBulkAddToRoutes}
+                  disabled={
+                    getSelectedRouteAdditions().length === 0 ||
+                    bulkDeleting ||
+                    bulkEmissionBusy ||
+                    bulkRouteAddBusy
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-800 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {bulkRouteAddBusy
+                    ? "Pasando a ruta…"
+                    : `Pasar a ruta (${getSelectedRouteAdditions().length})`}
                 </button>
                 <span className="text-xs text-slate-500">
                   {getValidSelection().length} seleccionado(s)
@@ -7203,7 +7303,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               {getSelectedDrafts().length > 0 && (
                 <button
                   type="button"
-                  disabled={bulkDeleting || bulkEmissionBusy}
+                  disabled={
+                    bulkDeleting || bulkEmissionBusy || bulkRouteAddBusy
+                  }
                   onClick={handleBulkEmission}
                   className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -7215,7 +7317,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               {getValidSelection().length > 0 && (
                 <button
                   type="button"
-                  disabled={bulkDeleting || bulkEmissionBusy}
+                  disabled={
+                    bulkDeleting || bulkEmissionBusy || bulkRouteAddBusy
+                  }
                   onClick={handleBulkDelete}
                   className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -7223,6 +7327,35 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                 </button>
               )}
             </div>
+            {bulkRouteAddSummary && (
+              <div
+                className="mt-3 space-y-1 text-sm text-slate-700"
+                role="status"
+                aria-live="polite"
+              >
+                <p>
+                  Añadidos: {bulkRouteAddSummary.addedIds.length}; omitidos:{" "}
+                  {bulkRouteAddSummary.omittedIds.length}; errores:{" "}
+                  {bulkRouteAddSummary.errors.length}.
+                </p>
+                {bulkRouteAddSummary.addedWithoutCoordinatesIds.length > 0 && (
+                  <p className="font-medium text-amber-800" role="alert">
+                    Advertencia:{" "}
+                    {bulkRouteAddSummary.addedWithoutCoordinatesIds.join(", ")}{" "}
+                    se añadieron sin coordenadas.
+                  </p>
+                )}
+                {bulkRouteAddSummary.errors.length > 0 && (
+                  <ul className="list-inside list-disc text-red-700">
+                    {bulkRouteAddSummary.errors.map(({ id, message }) => (
+                      <li key={id}>
+                        {id}: {message}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
             {bulkEmissionMessage && (
               <p
                 role="status"

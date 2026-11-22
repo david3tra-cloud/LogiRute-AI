@@ -13,7 +13,11 @@ export default defineConfig({
         url: "http://localhost/",
       },
     },
-    include: ["tests/deca-transportista/integration.test.tsx"],
+    include: [
+      "tests/deca-transportista/integration.test.tsx",
+      "tests/deca-bulk-add-to-routes.test.ts",
+      "tests/deca-bulk-add-to-routes.react.test.tsx",
+    ],
     setupFiles: ["tests/deca-transportista/integration.setup.ts"],
   },
 });

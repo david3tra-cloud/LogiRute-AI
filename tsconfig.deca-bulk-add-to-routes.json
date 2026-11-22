@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "decaBulkAddToRoutes.ts",
+    "tests/deca-bulk-add-to-routes.test.ts",
+    "tests/deca-bulk-add-to-routes.react.test.tsx"
+  ]
+}
