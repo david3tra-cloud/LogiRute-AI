@@ -21,6 +21,8 @@
   "files": [
     "vitest.config.mts",
     "tests/deca-transportista/integration.setup.ts",
-    "tests/deca-transportista/integration.test.tsx"
+    "tests/deca-transportista/integration.test.tsx",
+    "tests/deca-identities-resolution.test.ts",
+    "tests/deca-identities-default-carrier.test.tsx"
   ]
 }

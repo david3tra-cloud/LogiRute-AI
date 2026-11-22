@@ -62,10 +62,14 @@ const deleteCompiled = ts.transpileModule(deleteFn + '\nglobalThis.subject = del
 
 // listUserEmpresasHabituales: lectura paginada completa.
 let listFn = null;
+let listHelperFn = null;
 let pageSizeDecl = null;
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'listUserEmpresasHabituales') {
     listFn = node.getText(source).replace(/^export\s+/, '');
+  }
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'listEmpresaRowsForUser') {
+    listHelperFn = node.getText(source).replace(/^export\s+/, '');
   }
   if (ts.isVariableStatement(node)) {
     for (const decl of node.declarationList.declarations) {
@@ -76,9 +80,11 @@ for (const node of source.statements) {
   }
 }
 assert(listFn, 'No se encontro listUserEmpresasHabituales');
+assert(listHelperFn, 'No se encontro listEmpresaRowsForUser');
 assert(pageSizeDecl, 'No se encontro EMPRESA_PAGE_SIZE');
 const listCompiled = ts.transpileModule(
-  pageSizeDecl + '\n' + listFn + '\nglobalThis.listSubject = listUserEmpresasHabituales;',
+  pageSizeDecl + '\n' + listHelperFn + '\n' + listFn +
+    '\nglobalThis.listSubject = listUserEmpresasHabituales;',
   { compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None} }
 ).outputText;
 

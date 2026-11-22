@@ -16,6 +16,7 @@ export const OPTIONAL_DECA_CSV_HEADERS = [
   "direccion_destino",
   "destinatario_codigo_postal",
   "destinatario_pais",
+  "destinatario_nif",
   "bultos",
   "peso_kg",
   "transportista",
@@ -41,6 +42,7 @@ export const DECA_CSV_HEADERS = [
   "referencia_albaran",
   "destinatario_codigo_postal",
   "destinatario_pais",
+  "destinatario_nif",
 ] as const;
 
 export type DecaCsvRow = {
@@ -150,6 +152,7 @@ export const previewDecasCsv = (
       const direccionDestino = getVal("direccion_destino");
       const destinatarioCodigoPostal = getVal("destinatario_codigo_postal");
       const destinatarioPais = getVal("destinatario_pais");
+      const destinatarioNif = getVal("destinatario_nif");
       const transportista = getVal("transportista");
       const cargadorId = getVal("cargador_id");
       const cargadorNif = getVal("cargador_nif");
@@ -203,6 +206,7 @@ export const previewDecasCsv = (
         transportistaId: transportistaId || undefined,
         transportistaNif: transportistaNif || undefined,
         destinatario,
+        destinatarioNif: destinatarioNif || undefined,
         direccionDestino,
         ciudadDestino,
         destinatarioCodigoPostal: destinatarioCodigoPostal || undefined,
@@ -232,4 +236,4 @@ export const previewDecasCsv = (
 };
 
 export const decaTemplateCsv = () =>
-  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Calle Mayor 12;Valencia;Mercancía de ejemplo;12;1250.5;Transportes Rápidos S.A.;1234-BBB;ALB-2026-001;;`;
+  `\uFEFF${DECA_CSV_HEADERS.join(";")}\r\n2026-10-04;Empresa Ejemplo S.L.;Cliente Ejemplo S.L.;Calle Mayor 12;Valencia;Mercancía de ejemplo;12;1250.5;Transportes Rápidos S.A.;1234-BBB;ALB-2026-001;;;`;
