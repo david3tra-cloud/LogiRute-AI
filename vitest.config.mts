@@ -13,7 +13,11 @@ export default defineConfig({
         url: "http://localhost/",
       },
     },
-    include: ["tests/deca-transportista/integration.test.tsx"],
+    include: [
+      "tests/deca-transportista/integration.test.tsx",
+      "tests/deca-identities-*.test.ts",
+      "tests/deca-identities-*.test.tsx",
+    ],
     setupFiles: ["tests/deca-transportista/integration.setup.ts"],
   },
 });

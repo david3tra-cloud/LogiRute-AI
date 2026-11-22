@@ -74,10 +74,10 @@ const requireCurrentUserId = async (): Promise<string> => {
  */
 const EMPRESA_PAGE_SIZE = 500;
 
-export async function listUserEmpresasHabituales(): Promise<
-  EmpresaHabitualRow[]
-> {
-  const userId = await requireCurrentUserId();
+async function listEmpresaRowsForUser(
+  userId: string,
+  failureMessage = "No se pudieron cargar las empresas habituales",
+): Promise<EmpresaHabitualRow[]> {
   const rows: EmpresaHabitualRow[] = [];
   const seenIds = new Set<string>();
   let from = 0;
@@ -94,11 +94,7 @@ export async function listUserEmpresasHabituales(): Promise<
     if (error) {
       // Una lectura fallida o incompleta no autoriza retirar filas locales:
       // se aborta sin devolver ninguna fila.
-      return throwSupabaseError(
-        "No se pudieron cargar las empresas habituales",
-        error.message,
-        error.code,
-      );
+      return throwSupabaseError(failureMessage, error.message, error.code);
     }
 
     const page = data ?? [];
@@ -115,6 +111,12 @@ export async function listUserEmpresasHabituales(): Promise<
   }
 
   return rows;
+}
+
+export async function listUserEmpresasHabituales(): Promise<
+  EmpresaHabitualRow[]
+> {
+  return listEmpresaRowsForUser(await requireCurrentUserId());
 }
 
 export async function getUserEmpresaHabitual(
@@ -146,8 +148,10 @@ export async function loadUserEmpresaHabitualForDeCA(
   id: string | null | undefined,
   nif: string | null | undefined,
   nombre: string | null | undefined,
+  role: "cargador" | "destinatario" = "cargador",
 ): Promise<EmpresaHabitual | undefined> {
   const userId = await requireCurrentUserId();
+  const roleLabel = role === "destinatario" ? "destinatario" : "cargador";
   const normalizeNif = (value: string) =>
     normalizeRecipientText(value).replace(/\s+/g, "");
 
@@ -158,7 +162,7 @@ export async function loadUserEmpresaHabitualForDeCA(
   if (requestedId) {
     if (!resolvedId || !isUuid(resolvedId)) {
       throw new Error(
-        "El identificador del cargador no corresponde a una ficha guardada.",
+        `El identificador del ${roleLabel} no corresponde a una ficha guardada.`,
       );
     }
     const { data, error } = await supabase
@@ -176,7 +180,7 @@ export async function loadUserEmpresaHabitualForDeCA(
       );
     }
     if (!data) {
-      throw new Error("No se encontró la ficha del cargador indicada por ID.");
+      throw new Error(`No se encontró la ficha del ${roleLabel} indicada por ID.`);
     }
     if (
       (nif?.trim() &&
@@ -186,61 +190,51 @@ export async function loadUserEmpresaHabitualForDeCA(
           normalizeRecipientText(nombre))
     ) {
       throw new Error(
-        "El ID, el NIF y el nombre del cargador no corresponden a la misma ficha.",
+        `El ID, el NIF y el nombre del ${roleLabel} no corresponden a la misma ficha.`,
       );
     }
     return mapSupabaseEmpresaHabitualToLocal(data);
   }
 
   if (nif?.trim()) {
-    const { data, error } = await supabase
-      .from("empresas_habituales")
-      .select(EMPRESA_COLUMNS)
-      .eq("user_id", userId)
-      .eq("nif", nif.trim())
-      .maybeSingle();
-
-    if (error) {
-      return throwSupabaseError(
+    const matches = (
+      await listEmpresaRowsForUser(
+        userId,
         "No se pudo buscar la empresa habitual por NIF",
-        error.message,
-      );
+      )
+    ).filter((row) => normalizeNif(row.nif ?? "") === normalizeNif(nif));
+    if (!matches.length) {
+      throw new Error(`No se encontró la ficha del ${roleLabel} indicada por NIF.`);
     }
-    if (!data) {
-      throw new Error("No se encontró la ficha del cargador indicada por NIF.");
+    if (matches.length > 1) {
+      throw new Error(
+        `Hay varias fichas de ${roleLabel} coincidentes por NIF; selecciona una ficha concreta.`,
+      );
     }
     if (
       nombre?.trim() &&
-      normalizeRecipientText(data.nombre) !== normalizeRecipientText(nombre)
+      normalizeRecipientText(matches[0].nombre) !==
+        normalizeRecipientText(nombre)
     ) {
       throw new Error(
-        "El NIF y el nombre del cargador no corresponden a la misma ficha.",
+        `El NIF y el nombre del ${roleLabel} no corresponden a la misma ficha.`,
       );
     }
-    return mapSupabaseEmpresaHabitualToLocal(data);
+    return mapSupabaseEmpresaHabitualToLocal(matches[0]);
   }
 
   const normalizedName = normalizeRecipientText(nombre ?? "");
   if (!normalizedName) return undefined;
 
-  const { data, error } = await supabase
-    .from("empresas_habituales")
-    .select(EMPRESA_COLUMNS)
-    .eq("user_id", userId)
-    .order("nombre", { ascending: true });
-
-  if (error) {
-    return throwSupabaseError(
+  const matches = (
+    await listEmpresaRowsForUser(
+      userId,
       "No se pudo buscar la empresa habitual por nombre",
-      error.message,
-    );
-  }
-  const matches = (data ?? []).filter(
-    (row) => normalizeRecipientText(row.nombre) === normalizedName,
-  );
+    )
+  ).filter((row) => normalizeRecipientText(row.nombre) === normalizedName);
   if (matches.length > 1) {
     throw new Error(
-      "Hay varias fichas de cargador coincidentes; selecciona una ficha concreta.",
+      `Hay varias fichas de ${roleLabel} coincidentes; selecciona una ficha concreta.`,
     );
   }
   return matches[0]

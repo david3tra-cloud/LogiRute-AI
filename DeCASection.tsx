@@ -1,4 +1,10 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useCallback,
+} from "react";
 import type { AppModal, DeCASubView } from "./navigationHistory";
 import DeCAListCard from "./DeCAListCard";
 import QRCode from "qrcode";
@@ -78,6 +84,7 @@ import {
   transportistaFieldsFromDeCA,
   transportistaUpdateFields,
 } from "./decaTransportistaIdentity";
+import { mergeTransportistaCatalog } from "./decaTransportistaCatalog";
 import {
   getImageDimensions,
   recognizeDachserRegions,
@@ -248,6 +255,8 @@ type BulkDeCACommon = Pick<
   DeCA,
   | "fecha"
   | "cargador"
+  | "cargadorId"
+  | "cargadorNif"
   | "matriculaVehiculo"
   | "transportista"
   | "transportistaId"
@@ -261,9 +270,15 @@ type BulkDeCACommon = Pick<
   | "transportistaEmail"
   | "transportistaNotas"
 >;
+type TransportistaCatalogState = {
+  ownerId: string | null;
+  initialized: boolean;
+  items: TransportistaHabitual[];
+};
 type BulkDeCALine = {
   id: string;
   destinatario: string;
+  destinatarioNif: string;
   destinatarioCodigoPostal: string;
   destinatarioPais: string;
   direccionDestino: string;
@@ -1323,7 +1338,6 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   cargador: "",
   cargadorId: "",
   cargadorNif: "",
-  destinatarioNif: "",
   destinatarioCodigoPostal: "",
   destinatarioPais: "",
   transportista: defaultCarrier?.nombre ?? "",
@@ -1338,6 +1352,7 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   transportistaEmail: defaultCarrier?.email ?? "",
   transportistaNotas: defaultCarrier?.notas ?? "",
   destinatario: "",
+  destinatarioNif: "",
   direccionDestino: "",
   ciudadDestino: "",
   mercancia: "",
@@ -1346,6 +1361,27 @@ const createEmptyForm = (defaultCarrier?: TransportistaHabitual): DeCAForm => ({
   referenciaAlbaran: "",
   matriculaVehiculo: "",
   notas: "",
+});
+
+const EMPTY_TRANSPORTISTA_FIELDS = {
+  transportista: "",
+  transportistaId: "",
+  transportistaNif: "",
+  transportistaDireccion: "",
+  transportistaCiudad: "",
+  transportistaCodigoPostal: "",
+  transportistaProvincia: "",
+  transportistaPais: "",
+  transportistaTelefono: "",
+  transportistaEmail: "",
+  transportistaNotas: "",
+};
+
+const clearTransportistaFields = <T extends object>(
+  value: T,
+): T & typeof EMPTY_TRANSPORTISTA_FIELDS => ({
+  ...value,
+  ...EMPTY_TRANSPORTISTA_FIELDS,
 });
 
 const isActiveLocalDeCA = (value: unknown): value is DeCA => {
@@ -1491,14 +1527,30 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   >(undefined);
   const companyManagerReturnView = useRef<SectionView>("list");
   const [initialTransportistaLoad] = useState(() =>
-    loadTransportistas(sessionUserId ?? undefined),
+    sessionUserId
+      ? loadTransportistas(sessionUserId)
+      : { items: [], invalid: false },
   );
   const [initialTransportistaSyncEnabled] = useState(
     loadTransportistaSyncEnabled,
   );
-  const [transportistas, setTransportistas] = useState<TransportistaHabitual[]>(
-    initialTransportistaLoad.items,
-  );
+  const [transportistaCatalog, setTransportistaCatalog] =
+    useState<TransportistaCatalogState>(() => ({
+      ownerId: sessionUserId ?? null,
+      initialized: true,
+      items: initialTransportistaLoad.items,
+    }));
+  const transportistaCatalogIsCurrent =
+    transportistaCatalog.initialized &&
+    transportistaCatalog.ownerId === (sessionUserId ?? null);
+  const transportistas = transportistaCatalogIsCurrent
+    ? transportistaCatalog.items
+    : [];
+  const [transportistaRemoteLoading, setTransportistaRemoteLoading] =
+    useState(Boolean(sessionUserId));
+  const transportistaCatalogLoading =
+    Boolean(sessionUserId) &&
+    (!transportistaCatalogIsCurrent || transportistaRemoteLoading);
   const [transportistaStorageWarning, setTransportistaStorageWarning] =
     useState(initialTransportistaLoad.invalid);
   const [transportistaLoadError, setTransportistaLoadError] = useState("");
@@ -1506,8 +1558,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const [hasPendingTransportistaChanges, setHasPendingTransportistaChanges] =
     useState(
       () =>
-        loadTransportistaPendingSync(sessionUserId ?? undefined) ||
-        loadPendingTransportistaDeletes(sessionUserId ?? undefined).length > 0,
+        Boolean(
+          sessionUserId &&
+            (loadTransportistaPendingSync(sessionUserId) ||
+              loadPendingTransportistaDeletes(sessionUserId).length > 0),
+        ),
     );
   const [isMigratingTransportistas, setIsMigratingTransportistas] =
     useState(false);
@@ -1559,9 +1614,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const decaCsvFileRef = useRef<HTMLInputElement>(null);
   const decaCsvImportInProgressRef = useRef(false);
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
-  const [bulkCommon, setBulkCommon] = useState<BulkDeCACommon>(() => ({
+  const [bulkCommonState, setBulkCommonState] = useState<BulkDeCACommon>(() => ({
     fecha: getToday(),
     cargador: "",
+    cargadorId: "",
+    cargadorNif: "",
     matriculaVehiculo: "",
     transportista: "",
     transportistaId: "",
@@ -1575,12 +1632,16 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     transportistaEmail: "",
     transportistaNotas: "",
   }));
+  const bulkCommon = transportistaCatalogIsCurrent
+    ? bulkCommonState
+    : clearTransportistaFields(bulkCommonState);
   const [bulkLines, setBulkLines] = useState<BulkDeCALine[]>([
     {
       id:
         globalThis.crypto?.randomUUID?.() ??
         `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       destinatario: "",
+      destinatarioNif: "",
       destinatarioCodigoPostal: "",
       destinatarioPais: "",
       direccionDestino: "",
@@ -1634,14 +1695,27 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   } | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const bulkLoteUserRef = useRef<string | null>(null);
-  const [form, setForm] = useState<DeCAForm>(() =>
+  const [formState, setFormState] = useState<DeCAForm>(() =>
     createEmptyForm(
       initialTransportistaLoad.items.find((item) => item.esPredeterminado),
     ),
   );
+  const form = transportistaCatalogIsCurrent
+    ? formState
+    : clearTransportistaFields(formState);
+  const formModeRef = useRef<"new" | "existing" | "none">(
+    navSubView === "form" && !navSelectedId ? "new" : "none",
+  );
+  const bulkTransportistaTouchedRef = useRef(false);
+  const bulkPanelOpenRef = useRef(bulkPanelOpen);
+  const bulkCommonRef = useRef(bulkCommon);
+  const bulkResultsRef = useRef(bulkResults);
 
   const navigateToView = useCallback(
     (nextView: SectionView, docId?: string) => {
+      if (nextView === "list" || nextView === "detail") {
+        formModeRef.current = "none";
+      }
       if (onNavigate) {
         onNavigate(nextView as DeCASubView, docId);
       } else {
@@ -1653,12 +1727,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   );
 
   const handleVolver = useCallback(() => {
+    if (view === "form") formModeRef.current = "none";
     if (onGoBack) {
       onGoBack();
     } else {
       setView("list");
     }
-  }, [onGoBack]);
+  }, [onGoBack, view]);
 
   const handleCloseManager = useCallback(
     (returnView: SectionView) => {
@@ -1696,6 +1771,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
   const handleCloseModal = useCallback(
     (modal?: AppModal) => {
+      if (modal === "decaBulk" || modal === undefined) {
+        bulkPanelOpenRef.current = false;
+      }
       if (onCloseModal) {
         onCloseModal(modal);
       } else {
@@ -1712,7 +1790,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     if (navSubView && navSubView !== view) {
       setView(navSubView);
     }
-  }, [navSubView]);
+    if (navSubView === "form" && !navSelectedId) {
+      formModeRef.current = "new";
+    } else if (navSubView && navSubView !== "form") {
+      formModeRef.current = "none";
+    }
+  }, [navSubView, navSelectedId]);
 
   useEffect(() => {
     if (navSelectedId !== undefined && navSelectedId !== selectedId) {
@@ -1812,8 +1895,10 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const empresaMergeAmbiguityRef = useRef(false);
   const companyUnsyncedRowsRef = useRef<EmpresaHabitual[]>([]);
   const transportistasRef = useRef(initialTransportistaLoad.items);
+  const transportistaCatalogRef = useRef(transportistaCatalog);
+  const transportistaCatalogUserRef = useRef(sessionUserId);
   const pendingTransportistaDeletesRef = useRef(
-    loadPendingTransportistaDeletes(sessionUserId ?? undefined),
+    sessionUserId ? loadPendingTransportistaDeletes(sessionUserId) : [],
   );
   const transportistaSyncEnabledRef = useRef(initialTransportistaSyncEnabled);
   const transportistaMigrationInProgressRef = useRef(false);
@@ -1842,7 +1927,50 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const defaultDateRef = useRef(getToday());
   const formRef = useRef(form);
   formRef.current = form;
+  bulkPanelOpenRef.current = bulkPanelOpen;
+  bulkCommonRef.current = bulkCommon;
+  bulkResultsRef.current = bulkResults;
+  sessionUserIdRef.current = sessionUserId;
+  transportistasRef.current = transportistas;
   companiesRef.current = companies;
+
+  const publishTransportistaCatalog = (
+    ownerId: string | null,
+    items: TransportistaHabitual[],
+    allowInitialization = false,
+  ) => {
+    if (ownerId !== sessionUserIdRef.current) return false;
+    const current = transportistaCatalogRef.current;
+    if (
+      !allowInitialization &&
+      (!current.initialized || current.ownerId !== ownerId)
+    ) {
+      return false;
+    }
+
+    const next: TransportistaCatalogState = {
+      ownerId,
+      initialized: true,
+      items: ownerId ? items : [],
+    };
+    transportistaCatalogRef.current = next;
+    transportistasRef.current = next.items;
+    setTransportistaCatalog(next);
+    return true;
+  };
+
+  const setTransportistas = (items: TransportistaHabitual[]) =>
+    publishTransportistaCatalog(sessionUserId ?? null, items);
+  const setForm: React.Dispatch<React.SetStateAction<DeCAForm>> = (action) => {
+    if (sessionUserId !== sessionUserIdRef.current) return;
+    setFormState(action);
+  };
+  const setBulkCommon: React.Dispatch<
+    React.SetStateAction<BulkDeCACommon>
+  > = (action) => {
+    if (sessionUserId !== sessionUserIdRef.current) return;
+    setBulkCommonState(action);
+  };
 
   const persistTransportistasLocally = (
     items: TransportistaHabitual[],
@@ -1852,6 +1980,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     // sesión identificada; las reservas globales no se tocan ni se procesan.
     if (!sessionUserId) {
       setTransportistaStorageWarning(true);
+      return false;
+    }
+    const catalog = transportistaCatalogRef.current;
+    if (
+      sessionUserId !== sessionUserIdRef.current ||
+      !catalog.initialized ||
+      catalog.ownerId !== sessionUserId
+    ) {
       return false;
     }
     try {
@@ -1872,12 +2008,17 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const reconcileRemoteTransportistaDeletes = (deletedLocalIds: string[]) => {
-    if (deletedLocalIds.length === 0) return;
+    if (
+      deletedLocalIds.length === 0 ||
+      sessionUserId !== sessionUserIdRef.current ||
+      transportistaCatalogRef.current.ownerId !== sessionUserId
+    ) {
+      return;
+    }
     const deletedIds = new Set(deletedLocalIds);
     const activeItems = transportistasRef.current.filter(
       (item) => !deletedIds.has(item.id),
     );
-    transportistasRef.current = activeItems;
     setTransportistas(activeItems);
     persistTransportistasLocally(
       activeItems,
@@ -1888,6 +2029,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   const persistTransportistaPendingSync = (pending: boolean) => {
     if (!sessionUserId) {
       setTransportistaStorageWarning(true);
+      return;
+    }
+    const catalog = transportistaCatalogRef.current;
+    if (
+      sessionUserId !== sessionUserIdRef.current ||
+      !catalog.initialized ||
+      catalog.ownerId !== sessionUserId
+    ) {
       return;
     }
     try {
@@ -1935,6 +2084,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       cancelledLocalIds: string[];
     },
   ) => {
+    if (
+      !sessionUserId ||
+      sessionUserId !== sessionUserIdRef.current ||
+      transportistaCatalogRef.current.ownerId !== sessionUserId
+    ) {
+      return;
+    }
     const completedIds = new Set([
       ...result.confirmedDeletedLocalIds,
       ...result.cancelledLocalIds,
@@ -3236,88 +3392,194 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     }
   }, [plates, sessionUserId]);
 
-  useEffect(() => {
-    if (!sessionUserId) return;
-    try {
-      localStorage.setItem(
-        userStorageKey(TRANSPORTISTAS_STORAGE_KEY, sessionUserId),
-        JSON.stringify(transportistas),
+  useLayoutEffect(() => {
+    if (transportistaCatalogUserRef.current !== sessionUserId) {
+      transportistaCatalogUserRef.current = sessionUserId;
+      const localLoad = sessionUserId
+        ? loadTransportistas(sessionUserId)
+        : { items: [], invalid: false };
+      const localDefault = localLoad.items.find(
+        (item) => item.esPredeterminado,
       );
-    } catch {
-      setTransportistaStorageWarning(true);
-    }
-  }, [transportistas, sessionUserId]);
+      publishTransportistaCatalog(
+        sessionUserId ?? null,
+        localLoad.items,
+        true,
+      );
+      pendingTransportistaDeletesRef.current = sessionUserId
+        ? loadPendingTransportistaDeletes(sessionUserId)
+        : [];
+      transportistaDeleteTokenRef.current = Math.max(
+        0,
+        ...pendingTransportistaDeletesRef.current.map((item) => item.token),
+      );
+      setTransportistaStorageWarning(localLoad.invalid);
+      setHasPendingTransportistaChanges(
+        Boolean(
+          sessionUserId &&
+            (pendingTransportistaDeletesRef.current.length > 0 ||
+              loadTransportistaPendingSync(sessionUserId)),
+        ),
+      );
+      if (formModeRef.current === "new") {
+        const nextForm = createEmptyForm(localDefault);
+        formRef.current = nextForm;
+        setForm(nextForm);
+      } else {
+        const nextForm = clearTransportistaFields(formRef.current);
+        formRef.current = nextForm;
+        setForm(nextForm);
+      }
+      editedFieldsRef.current.clear();
+      manuallyEditedFieldsRef.current.clear();
+      setTransportistaQuery(
+        formModeRef.current === "new" ? localDefault?.nombre ?? "" : "",
+      );
 
-  useEffect(() => {
-    if (view !== "carriers") return;
+      bulkTransportistaTouchedRef.current = false;
+      const nextBulkCommon = clearTransportistaFields(bulkCommonRef.current);
+      if (bulkPanelOpenRef.current && localDefault) {
+        Object.assign(
+          nextBulkCommon,
+          selectTransportistaFields(
+            transportistaFieldsFromDeCA(nextBulkCommon),
+            localDefault,
+          ),
+        );
+      }
+      bulkCommonRef.current = nextBulkCommon;
+      setBulkCommon(nextBulkCommon);
+      setBulkOpenSuggestion(null);
+    }
+    if (!sessionUserId) {
+      setTransportistaRemoteLoading(false);
+      return;
+    }
     let active = true;
     const version = ++transportistaRemoteLoadVersionRef.current;
     setTransportistaLoadError("");
+    setTransportistaRemoteLoading(true);
 
     const loadRemoteTransportistas = async () => {
       try {
         const { activeRows: rows, deletedLocalIds } =
           await loadUserTransportistasWithTombstones();
-        if (!active || version !== transportistaRemoteLoadVersionRef.current) {
+        if (
+          !active ||
+          version !== transportistaRemoteLoadVersionRef.current ||
+          sessionUserIdRef.current !== sessionUserId
+        ) {
           return;
         }
 
-        reconcileRemoteTransportistaDeletes(deletedLocalIds);
         const pendingIds = new Set(
           pendingTransportistaDeletesRef.current.map((item) => item.id),
         );
         const remoteItems = rows
           .map(mapSupabaseTransportistaHabitualToLocal)
           .filter((item) => !pendingIds.has(item.id));
-        const merged = new Map(remoteItems.map((item) => [item.id, item]));
-        for (const item of transportistasRef.current) {
-          const remoteItem = merged.get(item.id);
-          if (!remoteItem) {
-            merged.set(item.id, item);
-            continue;
-          }
-
-          const localUpdatedAt = Date.parse(item.updatedAt);
-          const remoteUpdatedAt = Date.parse(remoteItem.updatedAt);
-          const datesAreComparable =
-            Number.isFinite(localUpdatedAt) && Number.isFinite(remoteUpdatedAt);
-
-          if (datesAreComparable && localUpdatedAt !== remoteUpdatedAt) {
-            if (localUpdatedAt > remoteUpdatedAt) {
-              merged.set(item.id, item);
-            }
-          } else if (!transportistaSyncEnabledRef.current) {
-            merged.set(item.id, item);
-          }
-        }
-
-        const mergedItems = [...merged.values()];
-        const defaultId = mergedItems.find((item) => item.esPredeterminado)?.id;
-        const normalized = normalizeTransportistaDefaults(
-          mergedItems.map((item) => ({
-            ...item,
-            esPredeterminado: item.id === defaultId,
-          })),
+        const normalized = mergeTransportistaCatalog(
+          transportistasRef.current,
+          remoteItems,
+          deletedLocalIds,
+          [...pendingIds],
+          transportistaSyncEnabledRef.current,
         );
+        if (
+          !publishTransportistaCatalog(sessionUserId, normalized)
+        ) {
+          return;
+        }
         const hasLocalPending =
           pendingTransportistaDeletesRef.current.length > 0 ||
-          loadTransportistaPendingSync(sessionUserId ?? undefined);
+          loadTransportistaPendingSync(sessionUserId);
 
-        transportistasRef.current = normalized;
-        setTransportistas(normalized);
         setHasPendingTransportistaChanges(hasLocalPending);
-        persistTransportistasLocally(
-          normalized,
-          pendingTransportistaDeletesRef.current,
+        setTransportistaRemoteLoading(false);
+
+        const defaultTransportista = normalized.find(
+          (item) => item.esPredeterminado,
         );
+        if (!defaultTransportista) return;
+
+        const carrierFields = [
+          "transportista",
+          "transportistaId",
+          "transportistaNif",
+          "transportistaDireccion",
+          "transportistaCiudad",
+          "transportistaCodigoPostal",
+          "transportistaProvincia",
+          "transportistaPais",
+          "transportistaTelefono",
+          "transportistaEmail",
+          "transportistaNotas",
+        ] as const;
+        const formCarrierEdited = carrierFields.some((field) =>
+          editedFieldsRef.current.has(field),
+        );
+        const currentForm = formRef.current;
+        const currentFormCarrierIsEmpty = carrierFields.every(
+          (field) => !currentForm[field]?.trim(),
+        );
+        if (
+          formModeRef.current === "new" &&
+          selectedIdRef.current === null &&
+          sessionUserIdRef.current === sessionUserId &&
+          !formCarrierEdited &&
+          currentFormCarrierIsEmpty
+        ) {
+          const nextForm = {
+            ...currentForm,
+            ...selectTransportistaFields(
+              transportistaFieldsFromDeCA(currentForm),
+              defaultTransportista,
+            ),
+          };
+          formRef.current = nextForm;
+          setForm(nextForm);
+          setTransportistaQuery(defaultTransportista.nombre);
+        }
+
+        const currentBulkCommon = bulkCommonRef.current;
+        const currentBulkCarrier = transportistaFieldsFromDeCA(
+          currentBulkCommon,
+        );
+        const bulkCarrierIsEmpty = Object.values(currentBulkCarrier).every(
+          (value) => !value?.trim(),
+        );
+        const bulkHasSavedLines = Object.values(bulkResultsRef.current).some(
+          (result) => result.saved,
+        );
+        if (
+          bulkPanelOpenRef.current &&
+          !bulkTransportistaTouchedRef.current &&
+          !bulkHasSavedLines &&
+          bulkCarrierIsEmpty
+        ) {
+          const nextBulkCommon = {
+            ...currentBulkCommon,
+            ...selectTransportistaFields(
+              currentBulkCarrier,
+              defaultTransportista,
+            ),
+          };
+          bulkCommonRef.current = nextBulkCommon;
+          setBulkCommon(nextBulkCommon);
+        }
       } catch (error) {
-        if (!active || version !== transportistaRemoteLoadVersionRef.current) {
+        if (
+          !active ||
+          version !== transportistaRemoteLoadVersionRef.current ||
+          sessionUserIdRef.current !== sessionUserId
+        ) {
           return;
         }
         const details = error instanceof Error ? ` ${error.message}` : "";
         setTransportistaLoadError(
           `No se pudieron cargar los transportistas remotos. Se conserva el catálogo local.${details}`,
         );
+        setTransportistaRemoteLoading(false);
       }
     };
 
@@ -3325,7 +3587,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     return () => {
       active = false;
     };
-  }, [view]);
+  }, [sessionUserId]);
 
   const selectedDeCA = decas.find((deca) => deca.id === selectedId);
   const addDeCAToRoutes = async (deca: DeCA) => {
@@ -3402,6 +3664,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         undefined,
         deca.destinatarioNif,
         deca.destinatario,
+        "destinatario",
       ),
     ]);
     return { cargador, destinatario };
@@ -3456,6 +3719,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           undefined,
           deca.destinatarioNif,
           deca.destinatario,
+          "destinatario",
         );
       },
       validate: validateDeCAForEmission,
@@ -3486,7 +3750,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       !selectedDeCA ||
       (!isSelectedDeCADraft && selectedDeCA.estado !== "EMITIENDO") ||
       bulkEmissionGateRef.current.isLocked ||
-      emissionAction === "reserving"
+      emissionAction === "reserving" ||
+      transportistaCatalogLoading
     ) {
       return;
     }
@@ -3506,7 +3771,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   useEffect(() => {
-    if (remoteLoading || remoteError) return;
+    if (remoteLoading || remoteError || transportistaCatalogLoading) return;
     const pending = decas.filter(
       (deca) =>
         deca.estado === "EMITIENDO" &&
@@ -3519,10 +3784,15 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       pending.map((deca) => deca.id),
       (id) => processDeCAEmission(id, true),
     );
-  }, [decas, remoteLoading, remoteError]);
+  }, [decas, remoteLoading, remoteError, transportistaCatalogLoading]);
 
   const reserveSelectedDeCAEmission = async () => {
-    if (!selectedDeCA || !isSelectedDeCADraft || emissionAction === "reserving")
+    if (
+      !selectedDeCA ||
+      !isSelectedDeCADraft ||
+      emissionAction === "reserving" ||
+      transportistaCatalogLoading
+    )
       return;
 
     const decaId = selectedDeCA.id;
@@ -3593,6 +3863,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             undefined,
             deca.destinatarioNif,
             deca.destinatario,
+            "destinatario",
           );
         },
         validate: (row, carrier, recipient) =>
@@ -3678,11 +3949,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
       if (result.kind === "preflight_error") {
         setEmissionAction("error");
+        const detail =
+          result.error instanceof Error ? ` ${result.error.message}` : "";
         setEmissionMessage(
           result.stage === "carrier"
-            ? "No se pudo verificar el cargador en Empresas habituales. No se reservó el DeCA."
+            ? `No se pudo verificar el cargador en Empresas habituales.${detail} No se reservó el DeCA.`
             : result.stage === "recipient"
-              ? "No se pudo verificar el destinatario. No se reservó el DeCA."
+              ? `No se pudo verificar el destinatario.${detail} No se reservó el DeCA.`
               : result.stage === "remote"
                 ? "No se pudo comprobar el estado remoto del DeCA. No se hizo una reserva."
                 : "No se pudo verificar la sesión actual. No se reservó el DeCA.",
@@ -4121,7 +4394,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     editedFieldsRef.current.add(field);
     const current = formRef.current;
     let next: DeCAForm = { ...current, [field]: value };
-    if (field === "cargador") {
+    if (field === "cargador" && value !== current.cargador) {
       next.cargadorId = "";
       next.cargadorNif = "";
     }
@@ -4143,7 +4416,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         ),
       };
     }
-    if (field === "destinatario") next.destinatarioNif = "";
+    if (field === "destinatario" && value !== current.destinatario) {
+      next.destinatarioNif = "";
+    }
     manuallyEditedFieldsRef.current.add(field);
     formRef.current = next;
     setForm(next);
@@ -4182,6 +4457,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       .sort((left, right) =>
         left.nombre.localeCompare(right.nombre, "es", { sensitivity: "base" }),
       );
+
+  const matchingCompanyNames = (name: string) =>
+    companies.filter(
+      (company) =>
+        normalizeRecipientText(company.nombre) === normalizeRecipientText(name),
+    );
 
   const selectDestinationCompany = (company: EmpresaHabitual) => {
     const next = {
@@ -4490,14 +4771,21 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const updateTransportistas = (next: TransportistaHabitual[]) => {
+    if (
+      !transportistaCatalogIsCurrent ||
+      !sessionUserId ||
+      sessionUserId !== sessionUserIdRef.current
+    ) {
+      return;
+    }
     ++transportistaRemoteLoadVersionRef.current;
+    setTransportistaRemoteLoading(false);
     const previous = transportistasRef.current;
     const normalized = normalizeTransportistaDefaults(next);
     const deletedIds = previous
       .filter((item) => !normalized.some((nextItem) => nextItem.id === item.id))
       .map((item) => item.id);
 
-    transportistasRef.current = normalized;
     transportistaRevisionRef.current += 1;
     pendingTransportistaDeletesRef.current =
       pendingTransportistaDeletesRef.current.filter(
@@ -4530,7 +4818,14 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const migrateLocalTransportistas = async (): Promise<void> => {
-    if (transportistaMigrationInProgressRef.current) return;
+    if (
+      transportistaMigrationInProgressRef.current ||
+      !transportistaCatalogIsCurrent ||
+      !sessionUserId ||
+      sessionUserId !== sessionUserIdRef.current
+    ) {
+      return;
+    }
     if (
       !persistTransportistasLocally(
         transportistasRef.current,
@@ -4545,6 +4840,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
     transportistaMigrationInProgressRef.current = true;
     ++transportistaRemoteLoadVersionRef.current;
+    setTransportistaRemoteLoading(false);
     const revisionAtStart = transportistaRevisionRef.current;
     const attempted = [...pendingTransportistaDeletesRef.current];
     setIsMigratingTransportistas(true);
@@ -4571,7 +4867,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
     try {
       const migrationResult = await migrationTask;
-      if (!migrationResult.ok) return;
+      if (
+        !migrationResult.ok ||
+        sessionUserId !== sessionUserIdRef.current ||
+        transportistaCatalogRef.current.ownerId !== sessionUserId
+      ) {
+        return;
+      }
 
       const latestLocalItems = transportistasRef.current;
       const latestLocalIds = new Set(latestLocalItems.map((item) => item.id));
@@ -4587,7 +4889,6 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       for (const item of latestLocalItems) merged.set(item.id, item);
 
       const normalized = normalizeTransportistaDefaults([...merged.values()]);
-      transportistasRef.current = normalized;
       setTransportistas(normalized);
       persistTransportistasLocally(
         normalized,
@@ -4865,6 +5166,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       alert("Este DeCA ya no está en borrador y no se puede editar.");
       return;
     }
+    formModeRef.current = "none";
 
     const now = new Date().toISOString();
     const savedForm = {
@@ -5096,6 +5398,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       selectDeCADrafts(decas, selectedDecaIds);
 
   const handleBulkEmission = async () => {
+      if (transportistaCatalogLoading) {
+        setBulkEmissionMessage(
+          "Espera a que termine la carga inicial de transportistas antes de emitir.",
+        );
+        return;
+      }
       const gate = bulkEmissionGateRef.current;
       if (gate.isLocked) return;
       const drafts = getSelectedDrafts();
@@ -5311,6 +5619,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const startNewDeCA = () => {
+    formModeRef.current = "new";
     setSelectedId(null);
     const nextForm = createEmptyForm(
       transportistas.find((item) => item.esPredeterminado),
@@ -5378,6 +5687,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
   const editSelectedDeCA = () => {
     if (!selectedDeCA || !isSelectedDeCADraft) return;
+    formModeRef.current = "existing";
     const next: DeCAForm = {
       fecha: selectedDeCA.fecha ?? getToday(),
       cargador: selectedDeCA.cargador ?? "",
@@ -5487,6 +5797,23 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   }
   if (!bulkCommon.cargador.trim()) {
     bulkCommonErrors.cargador = "El cargador es obligatorio.";
+  } else if (bulkCommon.cargadorId) {
+    const selectedLoader = companies.find(
+      (company) => company.id === bulkCommon.cargadorId,
+    );
+    if (
+      !selectedLoader ||
+      normalizeRecipientText(selectedLoader.nombre) !==
+        normalizeRecipientText(bulkCommon.cargador) ||
+      (bulkCommon.cargadorNif ?? "").replace(/\s+/g, "").toUpperCase() !==
+        selectedLoader.nif.replace(/\s+/g, "").toUpperCase()
+    ) {
+      bulkCommonErrors.cargador =
+        "La ficha de cargador seleccionada ya no coincide. Selecciona una ficha concreta.";
+    }
+  } else if (matchingCompanyNames(bulkCommon.cargador).length > 1) {
+    bulkCommonErrors.cargador =
+      "Hay varias fichas de cargador coincidentes; selecciona una ficha concreta.";
   }
   if (!normalizePlate(bulkCommon.matriculaVehiculo)) {
     bulkCommonErrors.matriculaVehiculo =
@@ -5502,6 +5829,31 @@ const DeCASection: React.FC<DeCASectionProps> = ({
     } = {};
     if (!line.destinatario.trim()) {
       errors.destinatario = "El destinatario es obligatorio.";
+    } else {
+      const nameMatches = matchingCompanyNames(line.destinatario);
+      if (line.destinatarioNif.trim()) {
+        const normalizedNif = line.destinatarioNif
+          .replace(/\s+/g, "")
+          .toUpperCase();
+        const nifMatches = companies.filter(
+          (company) =>
+            company.nif.replace(/\s+/g, "").toUpperCase() === normalizedNif,
+        );
+        const selectedMatches = nameMatches.filter(
+          (company) =>
+            company.nif.replace(/\s+/g, "").toUpperCase() === normalizedNif,
+        );
+        if (nifMatches.length > 1) {
+          errors.destinatario =
+            "Hay varias fichas de destinatario con el mismo NIF; no se pueden distinguir con los datos actuales.";
+        } else if (selectedMatches.length !== 1) {
+          errors.destinatario =
+            "La ficha de destinatario ya no coincide. Selecciona una ficha concreta.";
+        }
+      } else if (nameMatches.length > 1) {
+        errors.destinatario =
+          "Hay varias fichas de destinatario coincidentes; selecciona una ficha concreta.";
+      }
     }
     if (!line.ciudadDestino.trim()) {
       errors.ciudadDestino = "La ciudad de destino es obligatoria.";
@@ -5535,7 +5887,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   );
 
   const selectBulkLoaderCompany = (company: EmpresaHabitual) => {
-    setBulkCommon((current) => ({ ...current, cargador: company.nombre }));
+    setBulkCommon((current) => ({
+      ...current,
+      cargador: company.nombre,
+      cargadorId: company.id,
+      cargadorNif: company.nif,
+    }));
     setBulkOpenSuggestion(null);
   };
 
@@ -5549,6 +5906,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
           ? {
               ...line,
               destinatario: company.nombre,
+              destinatarioNif: company.nif,
               destinatarioCodigoPostal: company.codigoPostal,
               destinatarioPais:
                 manuallyEditedBulkRecipientCountriesRef.current.has(lineId)
@@ -5569,6 +5927,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const selectBulkTransportista = (item: TransportistaHabitual) => {
+    bulkTransportistaTouchedRef.current = true;
     setBulkCommon((current) => ({
       ...current,
       ...selectTransportistaFields(
@@ -5580,6 +5939,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
   };
 
   const updateBulkTransportista = (value: string) => {
+    bulkTransportistaTouchedRef.current = true;
     setBulkCommon((current) => {
       const currentTransportistaFields = transportistaFieldsFromDeCA(current);
       const selectedProfile = findTransportistaProfileForFields(
@@ -5600,13 +5960,16 @@ const DeCASection: React.FC<DeCASectionProps> = ({
 
   const openBulkPanel = () => {
     if (!hasSavedBulkLines) {
+      bulkTransportistaTouchedRef.current = false;
       manuallyEditedBulkRecipientCountriesRef.current.clear();
       const defaultTransportista = transportistas.find(
         (item) => item.esPredeterminado,
       );
-      setBulkCommon({
+      const nextBulkCommon = {
         fecha: getToday(),
         cargador: "",
+        cargadorId: "",
+        cargadorNif: "",
         matriculaVehiculo: "",
         transportista: defaultTransportista?.nombre ?? "",
         transportistaId: defaultTransportista?.id ?? "",
@@ -5619,13 +5982,16 @@ const DeCASection: React.FC<DeCASectionProps> = ({
         transportistaTelefono: defaultTransportista?.telefono ?? "",
         transportistaEmail: defaultTransportista?.email ?? "",
         transportistaNotas: defaultTransportista?.notas ?? "",
-      });
+      };
+      bulkCommonRef.current = nextBulkCommon;
+      setBulkCommon(nextBulkCommon);
       setBulkLines([
         {
           id:
             globalThis.crypto?.randomUUID?.() ??
             `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           destinatario: "",
+          destinatarioNif: "",
           destinatarioCodigoPostal: "",
           destinatarioPais: "",
           direccionDestino: "",
@@ -5640,6 +6006,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
       setBulkMessage("");
       setBulkError("");
     }
+    bulkPanelOpenRef.current = true;
     handleOpenModal("decaBulk");
   };
 
@@ -5677,9 +6044,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
           fecha: bulkCommon.fecha.trim(),
           cargador: bulkCommon.cargador.trim(),
+          cargadorId: bulkCommon.cargadorId?.trim() || undefined,
+          cargadorNif: bulkCommon.cargadorNif?.trim() || undefined,
           matriculaVehiculo: normalizePlate(bulkCommon.matriculaVehiculo),
           ...transportistaFieldsFromDeCA(bulkCommon),
           destinatario: line.destinatario.trim(),
+          destinatarioNif: line.destinatarioNif.trim() || undefined,
           destinatarioCodigoPostal: line.destinatarioCodigoPostal.trim() || undefined,
           destinatarioPais: line.destinatarioPais.trim() || undefined,
           direccionDestino: line.direccionDestino,
@@ -6042,6 +6412,22 @@ const DeCASection: React.FC<DeCASectionProps> = ({
             aplicación sigue disponible.
           </p>
         )}
+        {transportistaCatalogLoading &&
+          (view === "form" || bulkPanelOpen) && (
+            <p role="status" className="mb-4 text-sm text-slate-600">
+              Cargando el catálogo de transportistas. Puedes completar otros
+              datos; la emisión esperará a que termine esta comprobación.
+            </p>
+          )}
+        {transportistaLoadError && view !== "carriers" && (
+          <p
+            role="status"
+            className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900"
+          >
+            {transportistaLoadError} Si no hay una ficha local válida, puedes
+            seleccionar o completar el transportista manualmente.
+          </p>
+        )}
 
         {view === "companies" && (
           <DestinatariosManager
@@ -6271,9 +6657,13 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       value={bulkCommon.cargador}
                       onFocus={() => setBulkOpenSuggestion("loader")}
                       onChange={(event) => {
+                        const value = event.target.value;
                         setBulkCommon((current) => ({
                           ...current,
-                          cargador: event.target.value,
+                          cargador: value,
+                          ...(value !== current.cargador
+                            ? { cargadorId: "", cargadorNif: "" }
+                            : {}),
                         }));
                         setBulkOpenSuggestion("loader");
                       }}
@@ -6466,6 +6856,12 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     const updateLine = (changes: Partial<BulkDeCALine>) => {
                       if (Object.hasOwn(changes, "destinatarioPais")) {
                         manuallyEditedBulkRecipientCountriesRef.current.add(line.id);
+                      }
+                      if (
+                        Object.hasOwn(changes, "destinatario") &&
+                        changes.destinatario !== line.destinatario
+                      ) {
+                        changes = { ...changes, destinatarioNif: "" };
                       }
                       setBulkLines((current) =>
                         current.map((item) =>
@@ -6784,6 +7180,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                             globalThis.crypto?.randomUUID?.() ??
                             `${Date.now()}-${Math.random().toString(36).slice(2)}`,
                           destinatario: "",
+                          destinatarioNif: "",
                           destinatarioCodigoPostal: "",
                           destinatarioPais: "",
                           direccionDestino: "",
@@ -6851,6 +7248,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     son opcionales.
                     Opcionalmente puedes incluir direccion_destino,
                     destinatario_codigo_postal, destinatario_pais,
+                    destinatario_nif,
                     transportista, matricula y referencia_albaran. Las filas
                     importadas se crearán como borradores.
                   </p>
@@ -6901,7 +7299,7 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                     )}
                     {decaCsvIdentityGroups.length > 0 && (
                       <section
-                        aria-label="Resolución de fichas de cargadores y transportistas"
+                        aria-label="Resolución de fichas de cargadores, destinatarios y transportistas"
                         className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3"
                       >
                         <div>
@@ -6918,7 +7316,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                           const label =
                             group.role === "cargador"
                               ? "Cargador"
-                              : "Transportista";
+                              : group.role === "destinatario"
+                                ? "Destinatario"
+                                : "Transportista";
                           const resolvedProfile = group.profile;
                           const statusMessage =
                             group.status === "resolved"
@@ -6927,6 +7327,8 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                                 ? "Hay varias fichas coincidentes. Elige una."
                                 : group.status === "contradictory"
                                   ? "El ID, el NIF y el nombre apuntan a fichas distintas o incompatibles. Corrige el CSV o la ficha."
+                                    : group.status === "indistinguishable"
+                                      ? "Las fichas no se pueden distinguir con los campos del CSV. El modelo solo conserva el NIF del destinatario; corrige o completa las fichas antes de importar."
                                   : group.status === "incomplete"
                                     ? "La ficha coincidente no tiene todos los datos de identificación necesarios."
                                     : group.status === "needs_selection"
@@ -7025,15 +7427,17 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        group.role === "cargador"
-                                          ? openCompanyManager("create")
-                                          : openTransportistaManager()
+                                        group.role === "transportista"
+                                          ? openTransportistaManager()
+                                          : openCompanyManager("create")
                                       }
                                       className="min-h-9 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
                                     >
-                                      {group.role === "cargador"
-                                        ? "Abrir fichas de cargadores"
-                                        : "Abrir fichas de transportistas"}
+                                      {group.role === "transportista"
+                                        ? "Abrir fichas de transportistas"
+                                        : group.role === "destinatario"
+                                          ? "Abrir fichas de destinatarios"
+                                          : "Abrir fichas de cargadores"}
                                     </button>
                                   )}
                                 </>
@@ -7203,7 +7607,11 @@ const DeCASection: React.FC<DeCASectionProps> = ({
               {getSelectedDrafts().length > 0 && (
                 <button
                   type="button"
-                  disabled={bulkDeleting || bulkEmissionBusy}
+                  disabled={
+                    bulkDeleting ||
+                    bulkEmissionBusy ||
+                    transportistaCatalogLoading
+                  }
                   onClick={handleBulkEmission}
                   className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -8248,7 +8656,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       type="button"
                       onClick={handleEmitSelectedDeCA}
                       disabled={
-                        emissionAction === "reserving" || bulkEmissionBusy
+                        emissionAction === "reserving" ||
+                        bulkEmissionBusy ||
+                        transportistaCatalogLoading
                       }
                       className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
                     >
@@ -8262,7 +8672,9 @@ const DeCASection: React.FC<DeCASectionProps> = ({
                       type="button"
                       onClick={handleEmitSelectedDeCA}
                       disabled={
-                        emissionAction === "reserving" || bulkEmissionBusy
+                        emissionAction === "reserving" ||
+                        bulkEmissionBusy ||
+                        transportistaCatalogLoading
                       }
                       className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60"
                     >
