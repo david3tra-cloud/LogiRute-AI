@@ -51,6 +51,17 @@ const mocks = vi.hoisted(() => {
       unexpected("mapSupabaseDecaToLocal"),
     ),
   );
+  const loadUserTransportistasWithTombstones = vi.fn<
+    () => Promise<{
+      activeRows: Array<Record<string, unknown>>;
+      deletedLocalIds: string[];
+    }>
+  >(() => unexpected("loadUserTransportistasWithTombstones"));
+  failureRestorers.push(() =>
+    loadUserTransportistasWithTombstones.mockImplementation(() =>
+      unexpected("loadUserTransportistasWithTombstones"),
+    ),
+  );
   const updateUserDeca = vi.fn<
     (
       id: string,
@@ -100,9 +111,7 @@ const mocks = vi.hoisted(() => {
       updateUserEmpresaHabitual: fail("updateUserEmpresaHabitual"),
     },
     carrierService: {
-      loadUserTransportistasWithTombstones: fail(
-        "loadUserTransportistasWithTombstones",
-      ),
+      loadUserTransportistasWithTombstones,
       mapSupabaseTransportistaHabitualToLocal: fail(
         "mapSupabaseTransportistaHabitualToLocal",
       ),
@@ -315,6 +324,10 @@ beforeEach(() => {
     },
   });
   mocks.decaService.getCurrentUserId.mockResolvedValue(TEST_USER_ID);
+  mocks.carrierService.loadUserTransportistasWithTombstones.mockResolvedValue({
+    activeRows: [],
+    deletedLocalIds: [],
+  });
   mocks.decaService.listUserDecas.mockImplementation(
     async () => mocks.rows,
   );

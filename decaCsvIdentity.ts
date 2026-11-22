@@ -8,14 +8,18 @@ import type {
 } from "./types";
 import { normalizeRecipientText } from "./destinatariosService";
 
-export type DeCACsvIdentityRole = "cargador" | "transportista";
+export type DeCACsvIdentityRole =
+  | "cargador"
+  | "transportista"
+  | "destinatario";
 export type DeCACsvIdentityStatus =
   | "resolved"
   | "ambiguous"
   | "missing"
   | "incomplete"
   | "contradictory"
-  | "needs_selection";
+  | "needs_selection"
+  | "indistinguishable";
 
 export type DeCACsvIdentityProfile = EmpresaHabitual | TransportistaHabitual;
 
@@ -92,6 +96,12 @@ export const resolveDeCACsvIdentityGroups = (
         nif: row.deca.transportistaNif ?? "",
         profileId: row.deca.transportistaId ?? "",
       },
+      {
+        role: "destinatario" as const,
+        name: row.deca.destinatario,
+        nif: row.deca.destinatarioNif ?? "",
+        profileId: "",
+      },
     ];
 
     for (const identity of identities) {
@@ -128,7 +138,7 @@ export const resolveDeCACsvIdentityGroups = (
 
   return [...grouped.values()].map((group) => {
     const allProfiles: DeCACsvIdentityProfile[] =
-      group.role === "cargador" ? companies : transportistas;
+      group.role === "transportista" ? transportistas : companies;
     const profiles = allProfiles.filter((profile) =>
       profileMatchesGroup(profile, group),
     );
@@ -149,13 +159,43 @@ export const resolveDeCACsvIdentityGroups = (
         (group.name && nameMatches)
       );
     });
-    const selectableCandidates = profiles.filter(isCompleteProfile);
+    const selectableCandidates = profiles.filter((profile) => {
+      if (group.role !== "destinatario") return isCompleteProfile(profile);
+      if (!profile.nombre.trim() || !profile.nif.trim()) return false;
+      return (
+        allProfiles.filter(
+          (candidate) =>
+            normalizeIdentifier(candidate.nif) ===
+            normalizeIdentifier(profile.nif),
+        ).length === 1
+      );
+    });
     const chosenId = choices[group.key];
     const chosen = selectableCandidates.find((profile) => profile.id === chosenId);
+    const indistinguishableRecipientProfiles =
+      group.role === "destinatario" &&
+      (group.nif
+        ? allProfiles.filter(
+            (profile) =>
+              normalizeIdentifier(profile.nif) ===
+              normalizeIdentifier(group.nif),
+          ).length > 1
+        : (profiles.length > 1 && selectableCandidates.length === 0) ||
+          profiles.some(
+            (profile) =>
+              profile.nif.trim() &&
+              allProfiles.filter(
+                (candidate) =>
+                  normalizeIdentifier(candidate.nif) ===
+                  normalizeIdentifier(profile.nif),
+              ).length > 1,
+          ));
 
     let status: DeCACsvIdentityStatus;
     let profile: DeCACsvIdentityProfile | undefined;
-    if (chosen) {
+    if (indistinguishableRecipientProfiles) {
+      status = "indistinguishable";
+    } else if (chosen) {
       status = "resolved";
       profile = chosen;
     } else if (profiles.length === 0) {
@@ -163,7 +203,11 @@ export const resolveDeCACsvIdentityGroups = (
         hasIdentity && hasAnyIdentifierMatch ? "contradictory" : "missing";
     } else if (profiles.length > 1) {
       status = "ambiguous";
-    } else if (!isCompleteProfile(profiles[0])) {
+    } else if (
+      group.role === "destinatario"
+        ? !selectableCandidates.includes(profiles[0])
+        : !isCompleteProfile(profiles[0])
+    ) {
       status = "incomplete";
     } else if (!hasIdentity) {
       status = "needs_selection";
@@ -175,10 +219,22 @@ export const resolveDeCACsvIdentityGroups = (
     return {
       ...group,
       candidates: profiles,
-      selectableCandidates,
+      selectableCandidates: indistinguishableRecipientProfiles
+        ? []
+        : selectableCandidates,
       profile,
       status,
     };
+  }).filter((group) => {
+    if (
+      group.role !== "destinatario" ||
+      group.nif ||
+      group.status === "ambiguous" ||
+      group.status === "indistinguishable"
+    ) {
+      return true;
+    }
+    return group.candidates.length > 1 || group.status === "resolved";
   });
 };
 
@@ -201,8 +257,15 @@ export const resolveDeCACsvRows = (
       normalizeIdentifier(row.deca.transportistaNif ?? ""),
       (row.deca.transportistaId ?? "").trim(),
     ]);
+    const destinatarioKey = JSON.stringify([
+      "destinatario",
+      normalizeRecipientText(row.deca.destinatario),
+      normalizeIdentifier(row.deca.destinatarioNif ?? ""),
+      "",
+    ]);
     const cargadorGroup = byKey.get(cargadorKey);
     const transportistaGroup = byKey.get(transportistaKey);
+    const destinatarioGroup = byKey.get(destinatarioKey);
     const cargador =
       cargadorGroup?.status === "resolved"
         ? cargadorGroup.profile
@@ -210,6 +273,10 @@ export const resolveDeCACsvRows = (
     const transportista =
       transportistaGroup?.status === "resolved"
         ? transportistaGroup.profile
+        : undefined;
+    const destinatario =
+      destinatarioGroup?.status === "resolved"
+        ? destinatarioGroup.profile
         : undefined;
     const hasTransportistaIdentity = Boolean(
       row.deca.transportista.trim() ||
@@ -220,7 +287,9 @@ export const resolveDeCACsvRows = (
       !cargador ||
       cargadorGroup?.role !== "cargador" ||
       (hasTransportistaIdentity &&
-        (!transportista || transportistaGroup?.role !== "transportista"))
+        (!transportista || transportistaGroup?.role !== "transportista")) ||
+      (destinatarioGroup &&
+        (!destinatario || destinatarioGroup.role !== "destinatario"))
     ) {
       return [];
     }
@@ -235,6 +304,11 @@ export const resolveDeCACsvRows = (
         cargador: resolvedCargador.nombre,
         cargadorId: resolvedCargador.id,
         cargadorNif: resolvedCargador.nif,
+        ...(destinatario
+          ? {
+              destinatarioNif: destinatario.nif,
+            }
+          : {}),
         ...(resolvedTransportista
           ? {
               transportista: resolvedTransportista.nombre,

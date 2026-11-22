@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   mapSupabaseDecaToLocal: vi.fn(),
   retryPendingDecaDeletes: vi.fn(),
   listUserEmpresasHabituales: vi.fn(),
+  loadUserTransportistasWithTombstones: vi.fn(),
   unused: vi.fn(),
 }));
 
@@ -32,7 +33,8 @@ vi.mock("../empresasHabitualesSupabaseService", () => ({
 }));
 
 vi.mock("../transportistasHabitualesSupabaseService", () => ({
-  loadUserTransportistasWithTombstones: mocks.unused,
+  loadUserTransportistasWithTombstones:
+    mocks.loadUserTransportistasWithTombstones,
   mapSupabaseTransportistaHabitualToLocal: mocks.unused,
   migrateUserTransportistasHabituales: mocks.unused,
   syncUserTransportistasHabituales: mocks.unused,
@@ -147,6 +149,10 @@ beforeEach(() => {
     results: [],
   });
   mocks.listUserEmpresasHabituales.mockResolvedValue([]);
+  mocks.loadUserTransportistasWithTombstones.mockResolvedValue({
+    activeRows: [],
+    deletedLocalIds: [],
+  });
 });
 
 describe("DeCASection bulk route addition", () => {
