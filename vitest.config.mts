@@ -15,6 +15,8 @@ export default defineConfig({
     },
     include: [
       "tests/deca-transportista/integration.test.tsx",
+      "tests/deca-bulk-add-to-routes.test.ts",
+      "tests/deca-bulk-add-to-routes.react.test.tsx",
       "tests/deca-identities-*.test.ts",
       "tests/deca-identities-*.test.tsx",
     ],
